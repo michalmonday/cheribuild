@@ -34,16 +34,16 @@ import typing
 from collections import OrderedDict
 
 from .config.chericonfig import CheriConfig
-from .config.target_info import CrossCompileTarget
+from .config.target_info import CrossCompileTarget, AbstractProject
 from .processutils import set_env
-from .utils import add_error_context, AnsiColour, coloured, fatal_error, status_update, warning_message
+from .utils import add_error_context, AnsiColour, coloured, fatal_error, status_update, warning_message, query_yes_no
 
 if typing.TYPE_CHECKING:  # no-combine
-    from .projects.project import SimpleProject  # no-combine
+    from .projects.simple_project import SimpleProject  # no-combine
 
 
 class Target(object):
-    instantiating_targets_should_warn = True
+    instantiating_targets_should_warn: bool = True
 
     def __init__(self, name, _project_class: "typing.Type[SimpleProject]"):
         self.name = name
@@ -79,18 +79,19 @@ class Target(object):
         assert self.__project is not None
         return self.__project
 
-    def get_dependencies(self, config: CheriConfig) -> "typing.List[Target]":
-        return self.project_class.recursive_dependencies(config)
+    def get_dependencies(self, config: CheriConfig) -> "list[Target]":
+        # Due to cyclic imports + forward declarations we need to silence a bad-return-type error here
+        return self.project_class.recursive_dependencies(config)  # pytype: disable=bad-return-type
 
     # noinspection PyProtectedMember
     def cache_dependencies(self, config: CheriConfig) -> None:
         self.project_class._cache_full_dependencies(config, allow_already_cached=True)
 
-    def check_system_deps(self, config: CheriConfig):
+    def check_system_deps(self, config: CheriConfig) -> None:
         if self._completed:
             return
         project = self.get_or_create_project(None, config)
-        with project.set_env(PATH=config.dollar_path_with_other_tools):
+        with set_env(PATH=config.dollar_path_with_other_tools, config=config):
             # make sure all system dependencies exist first
             project.check_system_dependencies()
 
@@ -108,20 +109,22 @@ class Target(object):
         # instantiate the project and run it
         starttime = time.time()
         with add_error_context(coloured(AnsiColour.yellow, "(in target ", self.name, ")", sep="")):
-            project = self.get_or_create_project(self.project_class.get_crosscompile_target(config), config)
+            project = self.get_or_create_project(self.project_class.get_crosscompile_target(), config)
             # noinspection PyProtectedMember
             if not project._setup_called:
                 project.setup()
+                project.setup_late()
             # noinspection PyProtectedMember
             assert project._setup_called, str(self._project_class) + ": forgot to call super().setup()?"
+            assert project._setup_late_called, str(self._project_class) + ": forgot to call super().setup_late()?"
             new_env = {"PATH": project.config.dollar_path_with_other_tools}
             if project.config.clang_colour_diags:
                 new_env["CLANG_FORCE_COLOR_DIAGNOSTICS"] = "always"
-            with project.set_env(**new_env):
+            with set_env(**new_env, config=config):
                 func(project)
             status_update(msg, "for target '" + self.name + "' in", time.time() - starttime, "seconds")
 
-    def execute(self, config: CheriConfig):
+    def execute(self, config: CheriConfig) -> None:
         if self._completed:
             # TODO: make this an error once I have a clean solution for the pseudo targets
             warning_message(self.name, "has already been executed!")
@@ -149,7 +152,7 @@ class Target(object):
         self._do_run(config, msg="Ran benchmarks", func=lambda project: project.run_benchmarks())
         self._benchmarks_have_run = True
 
-    def reset(self):
+    def reset(self) -> None:
         # For unit tests to get a fresh instance
         self._completed = False
         self._tests_have_run = False
@@ -189,7 +192,7 @@ class Target(object):
         #     return False
         # return self.name < other.name  # not a dep and number of deps is the same -> compare name
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "<Target " + self.name + ">"
 
 
@@ -216,7 +219,7 @@ class MultiArchTarget(Target):
     def _create_project(self, config: CheriConfig) -> "SimpleProject":
         return self.project_class(config)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "<Cross target (" + self.target_arch.name + ") " + self.name + ">"
 
 
@@ -230,7 +233,7 @@ class _TargetAliasBase(Target):
     def xtarget(self):
         raise NotImplementedError()
 
-    def _create_project(self, config: CheriConfig):
+    def _create_project(self, config: CheriConfig) -> "SimpleProject":
         raise ValueError("Should not be called!")
 
     def get_real_target(self, cross_target: typing.Optional[CrossCompileTarget], config,
@@ -245,27 +248,27 @@ class _TargetAliasBase(Target):
         assert cross_target is not None
         return tgt.get_or_create_project(cross_target, config)
 
-    def execute(self, config):
+    def execute(self, config) -> None:
         return self.get_real_target(None, config).execute(config)
 
-    def run_tests(self, config: "CheriConfig"):
+    def run_tests(self, config: "CheriConfig") -> None:
         return self.get_real_target(None, config).run_tests(config)
 
-    def run_benchmarks(self, config: "CheriConfig"):
+    def run_benchmarks(self, config: "CheriConfig") -> None:
         return self.get_real_target(None, config).run_benchmarks(config)
 
-    def check_system_deps(self, config: CheriConfig):
+    def check_system_deps(self, config: CheriConfig) -> None:
         return self.get_real_target(None, config).check_system_deps(config)
 
 
 # This is used for targets like "libcxx", etc and resolves to "libcxx-cheri/libcxx-native/libcxx-mips"
 # at runtime
 class MultiArchTargetAlias(_TargetAliasBase):
-    def __init__(self, name, project_class):
+    def __init__(self, name, project_class) -> None:
         super().__init__(name, project_class)
-        self.derived_targets = []  # type: typing.List[MultiArchTarget]
+        self.derived_targets: "list[MultiArchTarget]" = []
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "<Cross target alias " + self.name + ">"
 
     @property
@@ -282,7 +285,7 @@ class MultiArchTargetAlias(_TargetAliasBase):
             # Use the default target:
             cross_target = self.project_class.default_architecture
         if cross_target is None:
-            raise ValueError("ERROR:", self.name, "does not have a default_architecture value!")
+            raise LookupError("ERROR:", self.name, "does not have a default_architecture value!")
         # find the correct derived project:
         for tgt in self.derived_targets:
             if tgt.target_arch is cross_target:
@@ -316,7 +319,7 @@ class SimpleTargetAlias(_TargetAliasBase):
                         caller: "typing.Union[SimpleProject, str]" = "<unknown>") -> Target:
         return self._real_target
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "<Target alias " + self.name + " (for " + self.real_target_name + ")>"
 
 
@@ -327,19 +330,17 @@ class DeprecatedTargetAlias(SimpleTargetAlias):
                         coloured(AnsiColour.magenta, ". Please use "),
                         coloured(AnsiColour.yellow, self.real_target_name),
                         coloured(AnsiColour.magenta, " instead."), sep="")
-        from .projects.project import SimpleProject
-        # noinspection PyProtectedMember
-        if not SimpleProject._query_yes_no(config, "Continue?", default_result=True):
+        if not query_yes_no(config, "Continue?", default_result=True):
             fatal_error("Cannot continue.")
         return self._real_target
 
 
 class TargetManager(object):
-    def __init__(self):
-        self._all_targets = {}  # type: typing.Dict[str, Target]
-        self._targets_for_command_line_options_only = {}  # type: typing.Dict[str, MultiArchTargetAlias]
+    def __init__(self) -> None:
+        self._all_targets: "dict[str, Target]" = {}
+        self._targets_for_command_line_options_only: "dict[str, MultiArchTargetAlias]" = {}
 
-    def add_target_for_config_options_only(self, target: MultiArchTargetAlias):
+    def add_target_for_config_options_only(self, target: MultiArchTargetAlias) -> None:
         # TODO remove this ugly hack
         self._targets_for_command_line_options_only[target.name] = target
 
@@ -355,7 +356,7 @@ class TargetManager(object):
         else:
             self._all_targets[name] = SimpleTargetAlias(name, real_target, self)
 
-    def register_command_line_options(self):
+    def register_command_line_options(self) -> None:
         # this cannot be done in the Project metaclass as otherwise we get
         # RuntimeError: super(): empty __class__ cell
         # https://stackoverflow.com/questions/13126727/how-is-super-in-python-3-implemented/28605694#28605694
@@ -367,11 +368,13 @@ class TargetManager(object):
         for tgt in self._targets_for_command_line_options_only.values():
             tgt.project_class.setup_config_options()
 
-    def target_disabled_reason(self, target: Target, config: CheriConfig) -> typing.Optional[str]:
+    @staticmethod
+    def target_disabled_reason(target: Target, config: CheriConfig) -> typing.Optional[str]:
         if not config.enable_hybrid_targets:
             xtarget = target.xtarget
             # NB: We allow hybrid for baremetal targets (for now...)
-            if xtarget.get_rootfs_target().is_cheri_hybrid() and not xtarget.target_info_cls.is_baremetal():
+            if (xtarget.get_rootfs_target().is_cheri_hybrid() and not xtarget.target_info_cls.is_baremetal()
+                    and not xtarget.is_native()):
                 return target.name + " is a hybrid target, which should not be used unless you know what you're " + \
                        "doing. If you are still sure you want to build this, use --enable-hybrid-targets."
         return None
@@ -386,17 +389,17 @@ class TargetManager(object):
         for name, value in self.enabled_target_items(config):
             yield name
 
-    def non_alias_target_names(self, config: typing.Optional[CheriConfig]) -> "typing.Generator[str]":
+    def non_alias_target_names(self, config: typing.Optional[CheriConfig]) -> "typing.Iterator[str]":
         for name, value in self.enabled_target_items(config):
             if not isinstance(value, _TargetAliasBase):
                 yield name
 
-    def non_deprecated_target_names(self, config: typing.Optional[CheriConfig]) -> "typing.Generator[str]":
+    def non_deprecated_target_names(self, config: typing.Optional[CheriConfig]) -> "typing.Iterator[str]":
         for name, value in self.enabled_target_items(config):
             if not isinstance(value, DeprecatedTargetAlias):
                 yield name
 
-    def targets(self, config: typing.Optional[CheriConfig]) -> "typing.Iterable[Target]":
+    def targets(self, config: typing.Optional[CheriConfig]) -> "typing.Iterator[Target]":
         for name, value in self.enabled_target_items(config):
             yield value
 
@@ -408,7 +411,7 @@ class TargetManager(object):
             return self._targets_for_command_line_options_only[name]
 
     def get_target(self, name: str, arch: typing.Optional[CrossCompileTarget], config: CheriConfig,
-                   caller: "typing.Union[SimpleProject, str]") -> Target:
+                   caller: "typing.Union[AbstractProject, str]") -> Target:
         target = self.get_target_raw(name)
         # print("get_target", name, arch, end="")
         if isinstance(target, MultiArchTargetAlias):
@@ -458,7 +461,7 @@ class TargetManager(object):
                 raise ValueError("selected target list is empty after --start-after/--start-with filtering")
         return sort
 
-    def run(self, config: CheriConfig, chosen_targets=None):
+    def run(self, config: CheriConfig, chosen_targets=None) -> None:
         if chosen_targets is None:
             chosen_targets = self.get_all_chosen_targets(config)
         with set_env(PATH=config.dollar_path_with_other_tools,
@@ -470,7 +473,7 @@ class TargetManager(object):
             for target in chosen_targets:
                 target.execute(config)
 
-    def get_all_chosen_targets(self, config) -> "typing.Iterable[Target]":
+    def get_all_chosen_targets(self, config) -> "list[Target]":
         # check that all target dependencies are correct:
         if os.getenv("CHERIBUILD_DEBUG"):
             for t in self._all_targets.values():
@@ -485,7 +488,7 @@ class TargetManager(object):
         # assert self._all_targets["llvm"] < self._all_targets["all"]
         # assert self._all_targets["disk-image"] > self._all_targets["qemu"]
         # assert self._all_targets["sdk"] > self._all_targets["sdk-sysroot"]
-        explicitly_chosen_targets = []  # type: typing.List[Target]
+        explicitly_chosen_targets: "list[Target]" = []
         for target_name in config.targets:
             if target_name not in self._all_targets:
                 # See if it was a target alias without a default
@@ -513,9 +516,9 @@ class TargetManager(object):
         Target.instantiating_targets_should_warn = False  # Fine to instantiate Project() now
         return chosen_targets
 
-    def reset(self):
+    def reset(self) -> None:
         for i in self._all_targets.values():
             i.reset()
 
 
-target_manager = TargetManager()
+target_manager: TargetManager = TargetManager()

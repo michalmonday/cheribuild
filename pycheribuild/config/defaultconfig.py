@@ -27,12 +27,15 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
+import argparse
 import os
+import sys
 from enum import Enum
 from pathlib import Path
 
 from .chericonfig import CheriConfig
-from .loader import ComputedDefaultValue, ConfigLoaderBase, JsonAndCommandLineConfigLoader
+from .config_loader_base import ComputedDefaultValue, ConfigLoaderBase
+from .loader import JsonAndCommandLineConfigLoader, argcomplete
 from ..utils import default_make_jobs_count
 
 
@@ -47,7 +50,7 @@ class CheribuildAction(Enum):
     DUMP_CONFIGURATION = ("--dump-configuration", "Print the current configuration as JSON. This can be saved to "
                                                   "~/.config/cheribuild.json to make it persistent")
 
-    def __init__(self, option_name, help_message, altname=None, actions=None):
+    def __init__(self, option_name, help_message, altname=None, actions=None) -> None:
         self.option_name = option_name
         self.help_message = help_message
         self.altname = altname
@@ -57,11 +60,32 @@ class CheribuildAction(Enum):
             self.actions = actions
 
 
+class DefaultCheribuildConfigLoader(JsonAndCommandLineConfigLoader):
+    def finalize_options(self, available_targets: list, **kwargs) -> None:
+        target_option = self._parser.add_argument("targets", metavar="TARGET", nargs=argparse.ZERO_OR_MORE,
+                                                  help="The targets to build")
+        if argcomplete and self.is_completing_arguments:
+            # if OSInfo.IS_FREEBSD: # FIXME: for some reason this won't work
+            self.completion_excludes = ["-t", "--skip-dependencies"]
+            if sys.platform.startswith("freebsd"):
+                self.completion_excludes += ["--freebsd-builder-copy-only", "--freebsd-builder-hostname",
+                                             "--freebsd-builder-output-path"]
+
+            visible_targets = available_targets.copy()
+            visible_targets.remove("__run_everything__")
+            target_completer = argcomplete.completers.ChoicesCompleter(visible_targets)
+            target_option.completer = target_completer
+            # make sure we get target completion for the unparsed args too by adding another zero_or more options
+            # not sure why this works but it's a nice hack
+            unparsed = self._parser.add_argument("targets", metavar="TARGET", type=list, nargs=argparse.ZERO_OR_MORE,
+                                                 help=argparse.SUPPRESS, choices=available_targets)
+            unparsed.completer = target_completer
+
+
 class DefaultCheriConfig(CheriConfig):
-    def __init__(self, loader: ConfigLoaderBase, available_targets: list):
+    def __init__(self, loader: ConfigLoaderBase, available_targets: list) -> None:
         super().__init__(loader, action_class=CheribuildAction)
         self.default_action = CheribuildAction.BUILD
-        assert isinstance(loader, JsonAndCommandLineConfigLoader)
         # The run mode:
         self.get_config_option = loader.add_option("get-config-option", type=str, metavar="KEY",
                                                    group=loader.action_group,
@@ -79,10 +103,11 @@ class DefaultCheriConfig(CheriConfig):
             "confirm-clone", help="Ask for confirmation before cloning repositories.")
         self.force_update = loader.add_bool_option("force-update", help="Always update (with autostash) even if there "
                                                                         "are uncommitted changes")
+        # TODO: should replace this group with a tristate value
+        configure_group = loader.add_mutually_exclusive_group()
         self.skip_configure = loader.add_bool_option("skip-configure", help="Skip the configure step",
-                                                     group=loader.configure_group)
-        self.force_configure = loader.add_bool_option("reconfigure", "-force-configure",
-                                                      group=loader.configure_group,
+                                                     group=configure_group)
+        self.force_configure = loader.add_bool_option("reconfigure", "-force-configure", group=configure_group,
                                                       help="Always run the configure step, even for CMake projects "
                                                            "with a valid cache.")
         self.include_dependencies = loader.add_commandline_only_bool_option(
@@ -121,8 +146,8 @@ class DefaultCheriConfig(CheriConfig):
         default_make_jobs_computed = ComputedDefaultValue(lambda p, cls: default_make_jobs,
                                                           as_string=str(default_make_jobs),
                                                           as_readme_string="<system-dependent>")
-        self.make_jobs = loader.add_option("make-jobs", "j", type=int, default=default_make_jobs_computed,
-                                           help="Number of jobs to use for compiling")
+        self.make_jobs: int = loader.add_option("make-jobs", "j", type=int, default=default_make_jobs_computed,
+                                                help="Number of jobs to use for compiling")
 
         # configurable paths
         self.source_root = loader.add_path_option("source-root",
@@ -159,9 +184,8 @@ class DefaultCheriConfig(CheriConfig):
             "enable-hybrid-for-purecap-rootfs-targets", default=False, help_hidden=True)
         loader.finalize_options(available_targets)
 
-    def load(self):
+    def load(self) -> None:
         super().load()
-        self.preferred_xtarget = None
         # now set some generic derived config options
         self.cheri_sdk_dir = self.tools_root / self.default_cheri_sdk_directory_name
         self.other_tools_dir = self.tools_root / "bootstrap"

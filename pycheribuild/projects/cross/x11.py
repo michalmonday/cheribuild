@@ -60,10 +60,6 @@ class X11Mixin:
 class X11AutotoolsProjectBase(X11Mixin, CrossCompileAutotoolsProject):
     do_not_add_to_targets = True
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.configure_command = self.source_dir / "autogen.sh"
-
 
 class X11MesonProject(X11Mixin, CrossCompileMesonProject):
     do_not_add_to_targets = True
@@ -73,19 +69,19 @@ class X11CMakeProject(X11Mixin, CrossCompileCMakeProject):
     do_not_add_to_targets = True
 
 
-class BuildXorgMacros(X11AutotoolsProjectBase):
+class BuildXorgMacros(X11Mixin, CrossCompileAutotoolsProject):
     target = "xorg-macros"
     repository = GitRepository("https://gitlab.freedesktop.org/xorg/util/macros.git")
 
 
-# Like X11AutotoolsProjectBase but also adds xorg-macros as a dependency
-class X11AutotoolsProject(X11AutotoolsProjectBase):
+class X11AutotoolsProject(X11Mixin, CrossCompileAutotoolsProject):
     do_not_add_to_targets = True
     dependencies = ["xorg-macros"]
 
     def setup(self):
         super().setup()
         self.configure_environment["ACLOCAL_PATH"] = BuildXorgMacros.get_install_dir(self) / "share/aclocal"
+        self.make_args.set_env(ACLOCAL_PATH=BuildXorgMacros.get_install_dir(self) / "share/aclocal")
         # Avoid building documentation
         self.configure_args.extend(["--with-doxygen=no", "--enable-specs=no", "--enable-devel-docs=no"])
 
@@ -95,7 +91,7 @@ class X11AutotoolsProject(X11AutotoolsProjectBase):
             self.configure_args.append("--enable-malloc0returnsnull")
 
     @property
-    def default_ldflags(self):
+    def default_ldflags(self) -> "list[str]":
         result = super().default_ldflags
         if not self.target_info.is_macos():
             result.append(DoNoQuoteStr("-Wl,--enable-new-dtags,-rpath,'$$ORIGIN/../lib'"))

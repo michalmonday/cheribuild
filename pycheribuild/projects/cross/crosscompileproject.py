@@ -32,13 +32,15 @@ import os
 import typing
 from pathlib import Path
 
-from ..project import (AutotoolsProject, BuildType, CheriConfig, CMakeProject, commandline_to_str, CrossCompileTarget,
-                       DefaultInstallDir, GitRepository, Linkage, MakeCommandKind, MakefileProject, MesonProject,
-                       Project, SimpleProject, SubversionRepository)
+from ..cmake_project import CMakeProject
+from ..meson_project import MesonProject
+from ..project import (AutotoolsProject, BuildType, CheriConfig, commandline_to_str, CrossCompileTarget, GitRepository,
+                       DefaultInstallDir, Linkage, MakeCommandKind, MakefileProject, Project, SubversionRepository)
+from ..simple_project import SimpleProject
 from ...config.compilation_targets import CompilationTargets
 from ...utils import AnsiColour, coloured
 
-__all__ = ["BenchmarkMixin", "CheriConfig", "CrossCompileCMakeProject", "CrossCompileAutotoolsProject",  # no-combine
+__all__ = ["CheriConfig", "CrossCompileCMakeProject", "CrossCompileAutotoolsProject",  # no-combine
            "CrossCompileTarget", "CrossCompileSimpleProject", "CrossCompileProject",  # no-combine
            "MakeCommandKind", "Linkage", "DefaultInstallDir", "BuildType", "CompilationTargets",  # no-combine
            "GitRepository", "CrossCompileMixin", "CrossCompileMakefileProject",  # no-combine
@@ -46,15 +48,14 @@ __all__ = ["BenchmarkMixin", "CheriConfig", "CrossCompileCMakeProject", "CrossCo
 
 
 if typing.TYPE_CHECKING:
-    _BenchmarkMixinBase = Project
     _CrossCompileMixinBase = SimpleProject
 else:
-    _BenchmarkMixinBase = object
     _CrossCompileMixinBase = object
 
 
 # This mixin sets supported_architectures to ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS and thereby
 # avoids repeating this for every target than can be cross-built
+# noinspection PyAbstractClass
 class CrossCompileMixin(_CrossCompileMixinBase):
     do_not_add_to_targets = True
     supported_architectures = CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS
@@ -66,20 +67,7 @@ class CrossCompileMixin(_CrossCompileMixinBase):
     cross_install_dir = DefaultInstallDir.ROOTFS_LOCALBASE
 
 
-# We also build benchmarks for hybrid to see whether those compilation flags change the results
-class BenchmarkMixin(_BenchmarkMixinBase):
-    supported_architectures = CompilationTargets.ALL_CHERIBSD_TARGETS_WITH_HYBRID_FOR_PURECAP_ROOTFS + [
-        CompilationTargets.NATIVE]
-    default_build_type = BuildType.RELEASE
-    prefer_full_lto_over_thin_lto = True
-
-    @property
-    def optimization_flags(self):
-        if self.build_type.is_release:
-            return ["-O3"]
-        return super().optimization_flags
-
-
+# noinspection PyAbstractClass
 class CrossCompileSimpleProject(CrossCompileMixin, SimpleProject):
     do_not_add_to_targets = True
 

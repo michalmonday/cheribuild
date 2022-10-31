@@ -29,10 +29,10 @@ import shutil
 from pathlib import Path
 
 from .crosscompileproject import CrossCompileAutotoolsProject, CrossCompileCMakeProject, CrossCompileMesonProject
-from ..project import DefaultInstallDir, GitRepository, SimpleProject, AutotoolsProject
-from ...config.chericonfig import CheriConfig
+from ..project import DefaultInstallDir, GitRepository, AutotoolsProject
+from ..simple_project import SimpleProject
+from ...config.chericonfig import CheriConfig, Linkage
 from ...config.compilation_targets import CompilationTargets
-from ...config.target_info import Linkage
 from ...utils import OSInfo
 from ...processutils import get_program_version, ssh_config_parameters
 
@@ -111,7 +111,7 @@ class BuildMtdev(CrossCompileAutotoolsProject):
 
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "list[str]":
-        if cls.get_crosscompile_target(config).target_info_cls.is_freebsd():
+        if cls.get_crosscompile_target().target_info_cls.is_freebsd():
             return super().dependencies(config) + ["linux-input-h"]
         return super().dependencies(config)
 
@@ -124,10 +124,6 @@ class BuildMtdev(CrossCompileAutotoolsProject):
         self.cross_warning_flags.append("-Wno-error=format")
         if self.target_info.is_freebsd():
             self.CFLAGS.append("-I" + str(BuildLinux_Input_H.get_instance(self).include_install_dir))
-
-    def configure(self, **kwargs):
-        self.run_cmd(self.source_dir / "autogen.sh", cwd=self.source_dir)
-        super().configure(**kwargs)
 
 
 class BuildLibEvdev(CrossCompileMesonProject):
@@ -154,7 +150,7 @@ class BuildLibInput(CrossCompileMesonProject):
     @classmethod
     def dependencies(cls, config) -> "list[str]":
         result = super().dependencies(config) + ["mtdev", "libevdev"]
-        if cls.get_crosscompile_target(config).target_info_cls.is_freebsd():
+        if cls.get_crosscompile_target().target_info_cls.is_freebsd():
             result.extend(["libudev-devd", "epoll-shim"])
         return result
 
@@ -190,17 +186,13 @@ class BuildLibFFI(CrossCompileAutotoolsProject):
             self.configure_args.append("--enable-debug")
         self.configure_args.append("--disable-docs")  # avoid dependency on makeinfo
 
-    def configure(self, **kwargs):
-        self.run_cmd(self.source_dir / "autogen.sh", cwd=self.source_dir)
-        super().configure(**kwargs)
-
     def run_tests(self):
         runtest_cmd = shutil.which("runtest")
         if not runtest_cmd:
             self.dependency_error("DejaGNU is not installed.",
                                   install_instructions=OSInfo.install_instructions("runtest", False, default="dejagnu",
                                                                                    apt="dejagnu", homebrew="deja-gnu"),
-                                  cheribuild_target="dejagnu")
+                                  cheribuild_target="dejagnu", cheribuild_xtarget=CompilationTargets.NATIVE)
         if self.compiling_for_host():
             self.run_cmd("make", "check", "RUNTESTFLAGS=-a", cwd=self.build_dir,
                          env=dict(DEJAGNU=self.source_dir / ".ci/site.exp", BOARDSDIR=self.source_dir / ".ci"))
@@ -210,10 +202,11 @@ class BuildLibFFI(CrossCompileAutotoolsProject):
                                               config=self.config)
             if runtest_ver < (1, 6, 4):
                 self.dependency_error("DejaGnu version", runtest_ver, "cannot be used to run tests remotely,",
-                                      "please install a newer version with cheribuild", cheribuild_target="dejagnu")
+                                      "please install a newer version with cheribuild",
+                                      cheribuild_target="dejagnu", cheribuild_xtarget=CompilationTargets.NATIVE)
 
             if self.can_run_binaries_on_remote_morello_board():
-                Path(self.build_dir, "site.exp").write_text(f"""
+                self.write_file(self.build_dir / "site.exp", contents=f"""
 if ![info exists boards_dir] {{
     set boards_dir {{}}
 }}
@@ -221,11 +214,11 @@ lappend boards_dir "{self.build_dir}"
 verbose "Global Config File: target_triplet is $target_triplet" 2
 global target_list
 set target_list "remote-cheribsd"
-""")
+""", overwrite=True)
                 ssh_options = "-o NoHostAuthenticationForLocalhost=yes"
                 ssh_port = ssh_config_parameters(self.config.remote_morello_board).get("port", "22")
                 ssh_user = ssh_config_parameters(self.config.remote_morello_board).get("user", "root")
-                Path(self.build_dir, "remote-cheribsd.exp").write_text(f"""
+                self.write_file(self.build_dir / "remote-cheribsd.exp", contents=f"""
 load_generic_config "unix"
 set_board_info connect ssh
 set_board_info hostname {self.config.remote_morello_board}
@@ -237,7 +230,7 @@ set_board_info ssh_opts "{ssh_options}"
 # set_board_info exec_shell "gdb-run-noninteractive.sh"
 # Build tests statically linked so they pick up the local libffi library
 set TOOL_OPTIONS -static
-""")
+""", overwrite=True)
                 self.run_cmd(["make", "check", "RUNTESTFLAGS=-a --target-board remote-cheribsd --xml"],
                              env=dict(BOARDSDIR=self.build_dir, DEJAGNU=self.build_dir / "site.exp"),
                              cwd=str(self.build_dir))
@@ -254,7 +247,7 @@ class BuildWayland(CrossCompileMesonProject):
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "list[str]":
         deps = super().dependencies(config)
-        target = cls.get_crosscompile_target(config)
+        target = cls.get_crosscompile_target()
         if not target.is_native() or target.target_info_cls.is_cheribsd():
             # For native (non-CheriBSD) builds we use the host libraries
             deps.extend(["libexpat", "libffi", "libxml2"])

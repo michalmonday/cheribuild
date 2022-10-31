@@ -39,7 +39,8 @@ from pathlib import Path
 from .cross.cheribsd import (BuildCHERIBSD, BuildFreeBSD, BuildFreeBSDWithDefaultOptions)
 from .cross.gdb import (BuildGDB, BuildKGDB)
 from .project import (AutotoolsProject, CheriConfig, ComputedDefaultValue, CPUArchitecture, CrossCompileTarget,
-                      DefaultInstallDir, GitRepository, MakeCommandKind, SimpleProject)
+                      DefaultInstallDir, GitRepository, MakeCommandKind)
+from .simple_project import SimpleProject
 from ..config.compilation_targets import CompilationTargets
 from ..mtree import MtreeFile
 from ..utils import AnsiColour, classproperty, coloured, include_local_file
@@ -96,8 +97,8 @@ class _AdditionalFileTemplates(object):
         return include_local_file("files/cheribsd/dot.bash_profile.in")
 
 
-def _default_disk_image_name(config: CheriConfig, directory: Path, project: "BuildDiskImageBase"):
-    xtarget = project.get_crosscompile_target(config)
+def _default_disk_image_name(_: CheriConfig, directory: Path, project: "BuildDiskImageBase"):
+    xtarget = project.get_crosscompile_target()
     if project.use_qcow2:
         suffix = "qcow2"
     else:
@@ -135,7 +136,7 @@ class BuildDiskImageBase(SimpleProject):
 
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "list[str]":
-        return [cls._source_class.get_class_for_target(cls.get_crosscompile_target(config)).target]
+        return [cls._source_class.get_class_for_target(cls.get_crosscompile_target()).target]
 
     @classmethod
     def setup_config_options(cls, *, default_hostname, extra_files_suffix="", **kwargs):
@@ -182,7 +183,7 @@ class BuildDiskImageBase(SimpleProject):
 
         self.makefs_cmd = None  # type: typing.Optional[Path]
         self.mkimg_cmd = None  # type: typing.Optional[Path]
-        source_class = self._source_class.get_class_for_target(self._get_source_class_target(config))
+        source_class = self._source_class.get_class_for_target(self._get_source_class_target())
         assert issubclass(source_class, BuildFreeBSD), source_class
         self.source_project = source_class.get_instance(self)
         assert isinstance(self.source_project, BuildFreeBSD)
@@ -199,8 +200,8 @@ class BuildDiskImageBase(SimpleProject):
         # MIPS needs big-endian disk images
         self.big_endian = self.compiling_for_mips(include_purecap=True)
 
-    def _get_source_class_target(self, config):
-        return self.get_crosscompile_target(config)
+    def _get_source_class_target(self):
+        return self.get_crosscompile_target()
 
     def add_file_to_image(self, file: Path, *, base_directory: Path = None, user="root", group="wheel", mode=None,
                           path_in_target=None, strip_binaries: bool = None):
@@ -246,27 +247,6 @@ class BuildDiskImageBase(SimpleProject):
                       coloured(AnsiColour.green, contents), sep="", end="")
             self.write_file(target_file, contents, never_print_cmd=True, overwrite=False, mode=mode)
         self.add_file_to_image(target_file, base_directory=base_dir)
-
-    def _wget_fetch(self, what, where):
-        # https://apple.stackexchange.com/a/100573/251654
-        # https://www.gnu.org/software/wget/manual/html_node/Directory-Options.html
-        wget_cmd = ["wget", "--no-host-directories", "--cut-dirs=3",  # strip prefix
-                    "--timestamping", "-r", "--level", "inf", "--no-parent",  # recursive but ignore parents
-                    "--convert-links", "--execute=robots = off",
-                    # ignore robots.txt files, don't download robots.txt files"
-                    "--no-verbose",
-                    ]
-        self.run_cmd(wget_cmd + what, cwd=where)
-
-    def _wget_fetch_dir(self, what, where):
-        if self.wget_via_tmp:
-            with tempfile.TemporaryDirectory(prefix="cheribuild-wget-") as td:
-                # Speed things up by using whatever we've got locally, too
-                self.run_cmd("rsync", "-avvP", str(where) + "/.", td + "/.")
-                self._wget_fetch(what, td)
-                self.run_cmd("rsync", "-avvP", "--no-times", "--delete", td + "/.", str(where) + "/.")
-        else:
-            self._wget_fetch(what, where)
 
     def prepare_rootfs(self):
         assert self.tmpdir is not None
@@ -446,7 +426,7 @@ class BuildDiskImageBase(SimpleProject):
         if not self.include_gdb and not self.include_kgdb:
             return
         # FIXME: if /usr/local/bin/gdb is in the image make /usr/bin/gdb a symlink
-        cross_target = self.source_project.get_crosscompile_target(self.config)
+        cross_target = self.source_project.crosscompile_target
         if cross_target.is_cheri_purecap():
             cross_target = cross_target.get_cheri_hybrid_for_purecap_rootfs_target()
         if cross_target not in BuildGDB.supported_architectures:
@@ -880,7 +860,7 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
             "strip", default=True, help="strip ELF files to reduce size of generated image")
         cls.include_cheribsdtest = cls.add_bool_option(
             "include-cheribsdtest", default=True, help="Also add static cheribsdtest base variants to the disk image")
-        cls.kernels = cls.add_config_option("kernel-names", kind=list, default=None,
+        cls.kernels = cls.add_config_option("kernel-names", kind=list, default=[""],
                                             help="Kernel(s) to include in the image; empty string or '/' for "
                                                  "/boot/kernel/, X for /boot/kernel.X/")
 
@@ -925,7 +905,7 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
         if self._have_cplusplus_support(["lib", "usr/lib"]):
             files_to_add.append(include_local_file("files/minimal-image/need-cplusplus.files"))
         if self.include_boot_kernel:
-            for k in (self.kernels if self.kernels is not None else [""]):
+            for k in self.kernels:
                 files_to_add.append("boot/%s/kernel" % ("kernel" if k == "" or k == "/" else ("kernel.%s" % (k,)),))
         elif self.kernels is not None:
             self.warning("This disk image is not installing kernels, yet kernel names given.")
@@ -1369,7 +1349,7 @@ class BuildCheriBSDDiskImage(BuildDiskImageBase):
     def dependencies(cls, config) -> "list[str]":
         result = super().dependencies(config)
         # GDB is not strictly a dependency, but having it in the disk image makes life a lot easier
-        xtarget = cls.get_crosscompile_target(config)
+        xtarget = cls.get_crosscompile_target()
         gdb_xtarget = xtarget.get_cheri_hybrid_for_purecap_rootfs_target() if xtarget.is_cheri_purecap() else xtarget
         result.append(BuildGDB.get_class_for_target(gdb_xtarget).target)
         return result
@@ -1383,8 +1363,8 @@ class BuildCheriBSDDiskImage(BuildDiskImageBase):
         self.minimum_image_size = "256m"  # let's try to shrink the image size
 
 
-def _default_tar_name(config: CheriConfig, directory: Path, project: "BuildDiskImageBase"):
-    xtarget = project.get_crosscompile_target(config)
+def _default_tar_name(_: CheriConfig, directory: Path, project: "BuildDiskImageBase"):
+    xtarget = project.get_crosscompile_target()
     return directory / (project.disk_image_prefix + project.build_configuration_suffix(xtarget) + ".tar.xz")
 
 

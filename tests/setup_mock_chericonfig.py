@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pycheribuild.config.chericonfig import CheriConfig
 from pycheribuild.config.loader import ConfigLoaderBase, DefaultValueOnlyConfigLoader
-from pycheribuild.projects.project import SimpleProject
+from pycheribuild.projects.simple_project import SimpleProject
 from pycheribuild.targets import Target
 from pycheribuild.utils import init_global_config
 
@@ -22,6 +22,7 @@ class MockConfig(CheriConfig):
         self.fake_loader._parsed_args = MockArgs()
         super().__init__(self.fake_loader, action_class=MockActions)
         self.default_action = ""
+        self.action = None
         self.source_root = source_root
         self.build_root = source_root / "build"
         self.output_root = source_root / "output"
@@ -41,7 +42,6 @@ class MockConfig(CheriConfig):
         self.include_dependencies = False
         self.create_compilation_db = False
         self.copy_compilation_db_to_source_dir = False
-        self.preferred_xtarget = None
         self.mips_cheri_bits = 128
         self.make_jobs = 2
         self.make_without_nice = True

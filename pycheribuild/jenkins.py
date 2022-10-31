@@ -39,33 +39,30 @@ import typing
 from pathlib import Path
 
 from .config.jenkinsconfig import JenkinsAction, JenkinsConfig
-from .config.loader import CommandLineConfigOption, ConfigLoaderBase
+from .config.loader import CommandLineConfigOption, CommandLineConfigLoader
 # make sure all projects are loaded so that target_manager gets populated
 # noinspection PyUnresolvedReferences
 from .projects import *  # noqa: F401,F403
 # noinspection PyUnresolvedReferences
 from .projects.cross import *  # noqa: F401,F403
 from .projects.cross.crosscompileproject import CrossCompileMixin
-from .projects.project import Project, SimpleProject
-from .targets import MultiArchTargetAlias, SimpleTargetAlias, Target, target_manager
+from .projects.project import Project
+from .projects.simple_project import SimpleProject
+from .targets import SimpleTargetAlias, Target, target_manager
 from .processutils import get_program_version, run_and_kill_children_on_exit, run_command
 from .utils import fatal_error, init_global_config, OSInfo, status_update, ThreadJoiner, warning_message
 
-EXTRACT_SDK_TARGET = "extract-sdk"
-RUN_EVERYTHING_TARGET = "__run_everything__"
+EXTRACT_SDK_TARGET: str = "extract-sdk"
+RUN_EVERYTHING_TARGET: str = "__run_everything__"
 
 
-class JenkinsConfigLoader(ConfigLoaderBase):
-    """
-    A simple config loader that always returns the default value for all added options
-    """
-
-    def load(self):
-        self._load_command_line_args()
+class JenkinsConfigLoader(CommandLineConfigLoader):
+    def load(self) -> None:
+        super().load()
         assert isinstance(self._parsed_args.targets, list)
         self._parsed_args.verbose = True
 
-    def finalize_options(self, available_targets: list, **kwargs):
+    def finalize_options(self, available_targets: list, **kwargs) -> None:
         target_option = self._parser.add_argument(
             "targets", metavar="TARGET", nargs=argparse.ZERO_OR_MORE, help="The target to build",
             choices=available_targets + [EXTRACT_SDK_TARGET, RUN_EVERYTHING_TARGET])
@@ -82,9 +79,6 @@ class JenkinsConfigLoader(ConfigLoaderBase):
                 print_suppressed=True,  # also include target-specific options
                 )
 
-    def __init__(self):
-        super().__init__(CommandLineConfigOption)
-
 
 class SdkArchive(object):
     def __init__(self, cheri_config: JenkinsConfig, name, *, required_globs: list = None, extra_args: list = None,
@@ -95,7 +89,7 @@ class SdkArchive(object):
         self.required_globs = [] if required_globs is None else required_globs  # type: list
         self.extra_args = [] if extra_args is None else extra_args  # type: list
 
-    def extract(self):
+    def extract(self) -> None:
         assert self.archive.exists(), str(self.archive)
         self.cheri_config.FS.makedirs(self.output_dir)
         run_command(["tar", "xf", self.archive, "-C", self.output_dir] + self.extra_args,
@@ -116,7 +110,7 @@ class SdkArchive(object):
                     return False
         return True
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return str(self.archive)
 
 
@@ -181,7 +175,7 @@ def extract_sdk_archives(cheri_config: JenkinsConfig, archives: "typing.List[Sdk
                                        expected_bindir / "ld", relative=True)
 
 
-def create_sdk_from_archives(cheri_config: JenkinsConfig, needs_cheribsd_sysroot, extract_all: bool):
+def create_sdk_from_archives(cheri_config: JenkinsConfig, needs_cheribsd_sysroot, extract_all: bool) -> None:
     # If the archive is newer, delete the existing sdk unless --keep-sdk is passed install root:
     all_archives = get_sdk_archives(cheri_config, needs_cheribsd_sysroot=needs_cheribsd_sysroot)
     status_update("Will use the following SDK archives:", all_archives)
@@ -208,7 +202,7 @@ def create_sdk_from_archives(cheri_config: JenkinsConfig, needs_cheribsd_sysroot
         extract_sdk_archives(cheri_config, archives)
 
 
-def _jenkins_main():
+def _jenkins_main() -> None:
     os.environ["_CHERIBUILD_JENKINS_BUILD"] = "1"
     all_target_names = list(sorted(target_manager.target_names(None)))
     config_loader = JenkinsConfigLoader()
@@ -219,10 +213,6 @@ def _jenkins_main():
     SimpleProject._config_loader = config_loader
     target_manager.register_command_line_options()
     cheri_config.load()
-    if cheri_config.verbose:
-        # json = cheri_config.get_options_json()  # make sure all config options are loaded
-        # pprint.pprint(config_loader.options)
-        pass
     init_global_config(cheri_config, test_mode=False)
 
     # special target to extract the sdk
@@ -279,19 +269,14 @@ def _jenkins_main():
         create_tarball(cheri_config)
 
 
-def build_target(cheri_config, target: Target):
+def build_target(cheri_config, target: Target) -> None:
     # Note: This if exists for now to avoid a large diff.
     if True:
         target.check_system_deps(cheri_config)
         # need to set destdir after check_system_deps:
-        project = target.get_or_create_project(cheri_config.preferred_xtarget, cheri_config)
+        project = target.get_or_create_project(None, cheri_config)
         assert project
         _ = project.all_dependency_names(cheri_config)  # Ensure dependencies are cached.
-        cross_target = project.get_crosscompile_target(cheri_config)
-        if isinstance(target, MultiArchTargetAlias) and cross_target is not None and \
-                cross_target != cheri_config.preferred_xtarget and cheri_config.preferred_xtarget is not None:
-            fatal_error("Cannot build project", project.target, "with cross compile target", cross_target.name,
-                        "when --cpu is set to", cheri_config.preferred_xtarget.name, fatal_when_pretending=True)
         if isinstance(project, CrossCompileMixin):
             project.destdir = cheri_config.output_root
             project._install_prefix = cheri_config.installation_prefix
@@ -315,7 +300,7 @@ def build_target(cheri_config, target: Target):
             target.run_tests(cheri_config)
 
 
-def create_tarball(cheri_config):
+def create_tarball(cheri_config) -> None:
     if True:  # Note: This if exists for now to avoid a large whitespace diff.
         bsdtar_path = shutil.which("bsdtar")
         tar_cmd = None
@@ -347,7 +332,7 @@ def create_tarball(cheri_config):
             assert len(cheri_config.targets) == 1, "--create-tarball only accepts one target name"
             target = target_manager.get_target_raw(cheri_config.targets[0])
             Target.instantiating_targets_should_warn = False
-            project = target.get_or_create_project(cheri_config.preferred_xtarget, cheri_config)
+            project = target.get_or_create_project(None, cheri_config)
             strip_binaries(cheri_config, project, cheri_config.workspace / "tarball")
         run_command(
             [tar_cmd, "--create", "--xz"] + tar_flags + ["-f", cheri_config.tarball_name, "-C", "tarball", "."],
@@ -355,7 +340,7 @@ def create_tarball(cheri_config):
         run_command("du", "-sh", cheri_config.workspace / cheri_config.tarball_name)
 
 
-def strip_binaries(_: JenkinsConfig, project: SimpleProject, directory: Path):
+def strip_binaries(_: JenkinsConfig, project: SimpleProject, directory: Path) -> None:
     status_update("Tarball directory size before stripping ELF files:")
     run_command("du", "-sh", directory)
     for root, dirs, filelist in os.walk(str(directory)):
@@ -369,5 +354,5 @@ def strip_binaries(_: JenkinsConfig, project: SimpleProject, directory: Path):
     run_command("du", "-sh", directory)
 
 
-def jenkins_main():
+def jenkins_main() -> None:
     run_and_kill_children_on_exit(_jenkins_main)

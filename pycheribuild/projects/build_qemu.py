@@ -32,10 +32,10 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from .project import (_cached_get_homebrew_prefix, AutotoolsProject, BuildType, CheriConfig, CPUArchitecture,
-                      CrossCompileTarget, DefaultInstallDir, GitRepository, MakeCommandKind, SimpleProject)
+from .project import (AutotoolsProject, BuildType, CheriConfig, CPUArchitecture, CrossCompileTarget, DefaultInstallDir,
+                      GitRepository, MakeCommandKind, ComputedDefaultValue)
+from .simple_project import _cached_get_homebrew_prefix, SimpleProject
 from ..config.compilation_targets import CompilationTargets, NewlibBaremetalTargetInfo
-from ..config.loader import ComputedDefaultValue
 
 
 class BuildQEMUBase(AutotoolsProject):
@@ -87,10 +87,10 @@ class BuildQEMUBase(AutotoolsProject):
             if config is None:
                 config = caller.config
             if xtarget is None:
-                xtarget = caller.get_crosscompile_target(config)
+                xtarget = caller.get_crosscompile_target()
         else:
             if xtarget is None:
-                xtarget = cls.get_crosscompile_target(config)
+                xtarget = cls.get_crosscompile_target()
             assert config is not None, "Need either caller or config argument!"
         return cls.qemu_binary_for_target(xtarget, config)
 

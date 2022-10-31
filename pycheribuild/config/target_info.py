@@ -27,20 +27,23 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
+import functools
 import platform
 import typing
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
+from typing import Optional, ClassVar
 
-from ..utils import cached_property, final, OSInfo, warning_message
+from .chericonfig import CheriConfig, AArch64FloatSimdOptions, MipsFloatAbi
+from ..utils import cached_property, final, OSInfo, warning_message, status_update, fatal_error, Type_T
+from ..filesystemutils import FileSystemUtils
+from ..processutils import get_compiler_info, CompilerInfo
 
-if typing.TYPE_CHECKING:  # no-combine
-    from .chericonfig import CheriConfig  # no-combine    # pytype: disable=pyi-error
-    from ..projects.project import SimpleProject, Project  # no-combine
 
-__all__ = ["AArch64FloatSimdOptions", "AutoVarInit", "BasicCompilationTargets", "CPUArchitecture",  # no-combine
-           "CrossCompileTarget", "Linkage", "CompilerType", "MipsFloatAbi", "TargetInfo"]  # no-combine
+__all__ = ["AbstractProject", "AArch64FloatSimdOptions", "AutoVarInit", "BasicCompilationTargets",  # no-combine
+           "CPUArchitecture",  "CrossCompileTarget", "CompilerType", "MipsFloatAbi", "TargetInfo",  # no-combine
+           "NativeTargetInfo"]  # no-combine
 
 
 class CPUArchitecture(Enum):
@@ -77,7 +80,7 @@ class CPUArchitecture(Enum):
         if self is CPUArchitecture.ARM32:
             return "arm"
         # All others match the Meson table
-        return self.value
+        return str(self.value)
 
     def endianess(self) -> str:
         # Meson expects us to pass this manually... Why not query the compiler???
@@ -99,17 +102,78 @@ class CompilerType(Enum):
     CUSTOM = "custom"  # Custom compiler specific in config file/command line
 
 
-class TargetInfo(ABC):
-    shortname = "INVALID"  # type: str
-    # os_prefix defaults to shortname.lower() if not set
-    os_prefix = None  # type: typing.Optional[str]
+# https://reviews.llvm.org/rG14daa20be1ad89639ec209d969232d19cf698845
+class AutoVarInit(Enum):
+    NONE = "none"
+    ZERO = "zero"
+    PATTERN = "pattern"
 
-    def __init__(self, target: "CrossCompileTarget", project: "SimpleProject"):
+    def clang_flags(self) -> "list[str]":
+        if self is None:
+            return []  # Equivalent to -ftrivial-auto-var-init=uninitialized
+        elif self is AutoVarInit.ZERO:
+            return ["-ftrivial-auto-var-init=zero",
+                    "-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang"]
+        elif self is AutoVarInit.PATTERN:
+            return ["-ftrivial-auto-var-init=pattern"]
+        else:
+            raise NotImplementedError()
+
+
+class AbstractProject(FileSystemUtils):
+    """A base class for (Simple)Project that exposes only the fields/methods needed in target_info."""
+    config: CheriConfig
+    target: str
+    _setup_called: bool
+    _xtarget: "Optional[CrossCompileTarget]" = None
+
+    auto_var_init: AutoVarInit  # Needed for essential_compiler_flags
+    default_architecture: "ClassVar[Optional[CrossCompileTarget]]"
+    needs_sysroot: "ClassVar[bool]"
+
+    # Allow overrides for libc++/llvm-test-suite
+    custom_c_preprocessor: Optional[Path] = None
+    custom_c_compiler: Optional[Path] = None
+    custom_cxx_compiler: Optional[Path] = None
+
+    def get_compiler_info(self, compiler: Path) -> CompilerInfo:
+        return get_compiler_info(compiler, config=self.config)
+
+    @staticmethod
+    def info(*args, **kwargs) -> None:
+        # TODO: move all those methods here
+        status_update(*args, **kwargs)
+
+    @staticmethod
+    def warning(*args, **kwargs) -> None:
+        warning_message(*args, **kwargs)
+
+    @staticmethod
+    def fatal(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False) -> None:
+        fatal_error(*args, sep=sep, fixit_hint=fixit_hint, fatal_when_pretending=fatal_when_pretending)
+
+    @classmethod
+    def get_crosscompile_target(cls) -> "CrossCompileTarget":
+        target = cls._xtarget
+        if target is not None:
+            return target
+        # otherwise fall back to the default specified in the class
+        result = cls.default_architecture
+        assert result is not None
+        return result
+
+
+class TargetInfo(ABC):
+    shortname: str = "INVALID"
+    # os_prefix defaults to shortname.lower() if not set
+    os_prefix: Optional[str] = None
+
+    def __init__(self, target: "CrossCompileTarget", project: AbstractProject):
         self.target = target
         self.project = project
 
     @property
-    def cmake_processor_id(self):
+    def cmake_processor_id(self) -> str:
         if self.target.is_mips(include_purecap=True):
             if self.target.is_cheri_purecap():
                 return "CHERI (MIPS IV compatible) with {}-bit capabilities".format(self.config.mips_cheri_bits_str)
@@ -117,7 +181,7 @@ class TargetInfo(ABC):
                 return "BERI (MIPS IV compatible)"
         if self.target.is_aarch64(include_purecap=True):
             return "ARM64"
-        return self.target.cpu_architecture.value
+        return str(self.target.cpu_architecture.value)
 
     @property
     @abstractmethod
@@ -128,8 +192,7 @@ class TargetInfo(ABC):
     def toolchain_system_version(self) -> "typing.Optional[str]":
         return None
 
-    @property
-    def cmake_prefix_paths(self) -> "list[Path]":
+    def cmake_prefix_paths(self, config: "CheriConfig") -> "list[Path]":
         """List of additional directories to be searched for packages (e.g. sysroot/usr/local/riscv64-purecap)"""
         return []
 
@@ -208,7 +271,7 @@ class TargetInfo(ABC):
     @abstractmethod
     def essential_compiler_and_linker_flags_impl(cls, instance: "TargetInfo", *, xtarget: "CrossCompileTarget",
                                                  perform_sanity_checks=True, default_flags_only=False,
-                                                 softfloat: bool = None):
+                                                 softfloat: bool = None) -> "list[str]":
         """
         :return: flags such as -target + -mabi which are needed for both compiler and linker
         """
@@ -216,13 +279,13 @@ class TargetInfo(ABC):
 
     def get_essential_compiler_and_linker_flags(self, xtarget: "CrossCompileTarget" = None,
                                                 perform_sanity_checks=True, default_flags_only=False,
-                                                softfloat: bool = None):
+                                                softfloat: bool = None) -> "list[str]":
         return self.essential_compiler_and_linker_flags_impl(self, perform_sanity_checks=perform_sanity_checks,
                                                              xtarget=xtarget if xtarget is not None else self.target,
                                                              default_flags_only=default_flags_only, softfloat=softfloat)
 
     @property
-    def additional_executable_link_flags(self):
+    def additional_executable_link_flags(self) -> "list[str]":
         """Additional linker flags that need to be passed when building an executable (e.g. custom linker script)"""
         return []
 
@@ -238,7 +301,7 @@ class TargetInfo(ABC):
     @property
     def localbase(self) -> Path:
         """Relative path from the root to LOCALBASE (usr/local on FreeBSD)"""
-        raise NotImplementedError("Should only be called for FreeBSD targets")
+        raise RuntimeError("Should only be called for FreeBSD targets")
 
     @property
     @abstractmethod
@@ -247,12 +310,12 @@ class TargetInfo(ABC):
 
     @classmethod
     @abstractmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
         """returns e.g. [llvm]/[upstream-llvm], or an empty list"""
         ...
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
         """returns a list of targets that need to be built for a minimal sysroot"""
         return []
 
@@ -270,7 +333,11 @@ class TargetInfo(ABC):
         return []  # whatever the default is
 
     @property
-    def install_prefix_dirname(self):
+    def pkg_config_libdir_override(self) -> "typing.Optional[str]":
+        raise ValueError("Should only be called for native")
+
+    @property
+    def install_prefix_dirname(self) -> str:
         """The name of the root directory to install to: i.e. for CheriBSD /usr/local/mips64-purecap or
         /usr/local/riscv64-hybrid"""
         result = self.target.generic_arch_suffix
@@ -279,68 +346,66 @@ class TargetInfo(ABC):
         return result
 
     @property
-    def config(self) -> "CheriConfig":
+    def config(self) -> CheriConfig:
         return self.project.config
 
     @property
-    def must_link_statically(self):
+    def must_link_statically(self) -> bool:
         """E.g. for baremetal target infos we have to link statically (and add the -static linker flag)"""
         return False
 
     @final
-    def get_rootfs_project(self, xtarget: "CrossCompileTarget" = None) -> "Project":
+    def get_rootfs_project(self, *, t: "typing.Type[Type_T]", xtarget: "CrossCompileTarget" = None) -> Type_T:
         if xtarget is None:
             xtarget = self.target
-        return self._get_rootfs_project(xtarget.get_rootfs_target())
+        result = self._get_rootfs_project(xtarget.get_rootfs_target())
+        assert isinstance(result, t)
+        return result
 
-    def _get_rootfs_project(self, xtarget: "CrossCompileTarget") -> "Project":
-        raise NotImplementedError("Should not be called for " + self.project.target)
+    def _get_rootfs_project(self, xtarget: "CrossCompileTarget") -> "AbstractProject":
+        raise LookupError("Should not be called for " + self.project.target)
 
     @classmethod
-    def is_native(cls):
+    def is_native(cls) -> bool:
         return False
 
     @classmethod
-    def is_baremetal(cls):
+    def is_baremetal(cls) -> bool:
         return False
 
     @classmethod
-    def is_rtems(cls):
+    def is_rtems(cls) -> bool:
         return False
 
     @classmethod
-    def is_newlib(cls):
+    def is_newlib(cls) -> bool:
         return False
 
     @classmethod
-    def is_freebsd(cls):
+    def is_freebsd(cls) -> bool:
         return False
 
     @classmethod
-    def is_cheribsd(cls):
+    def is_cheribsd(cls) -> bool:
         return False
 
     def run_cheribsd_test_script(self, script_name, *script_args, kernel_path=None, disk_image_path=None,
                                  mount_builddir=True, mount_sourcedir=False, mount_sysroot=False,
                                  use_full_disk_image=False, mount_installdir=False,
                                  use_benchmark_kernel_by_default=False,
-                                 rootfs_alternate_kernel_dir=None):
+                                 rootfs_alternate_kernel_dir=None) -> None:
         raise ValueError("run_cheribsd_test_script only supports CheriBSD targets")
 
-    def run_fpga_benchmark(self, benchmarks_dir: Path, *, output_file: str = None, benchmark_script: str = None,
-                           benchmark_script_args: list = None, extra_runbench_args: list = None):
-        raise ValueError("run_fpga_benchmark only supports CheriBSD targets")
-
     @classmethod
-    def is_macos(cls):
+    def is_macos(cls) -> bool:
         return False
 
     @classmethod
-    def is_linux(cls):
+    def is_linux(cls) -> bool:
         return False
 
     @property
-    def pointer_size(self):
+    def pointer_size(self) -> int:
         if self.target.is_cheri_purecap():
             return self.capability_size
         if self.target.is_i386():
@@ -349,7 +414,7 @@ class TargetInfo(ABC):
         return 8
 
     @property
-    def capability_size(self):
+    def capability_size(self) -> int:
         if self.target.is_hybrid_or_purecap_cheri([CPUArchitecture.MIPS64]):
             assert self.config.mips_cheri_bits in (128, 256), "No other cap size supported yet"
             return self.config.mips_cheri_bits // 8
@@ -362,25 +427,25 @@ class TargetInfo(ABC):
         raise ValueError("Capabilities not supported for " + repr(self))
 
     @property
-    def capability_size_in_bits(self):
+    def capability_size_in_bits(self) -> int:
         return self.capability_size * 8
 
     @staticmethod
-    def host_c_compiler(config: "CheriConfig") -> Path:
+    def host_c_compiler(config: CheriConfig) -> Path:
         if config.use_sdk_clang_for_native_xbuild and not OSInfo.IS_MAC:
             # SDK clang doesn't work for native builds on macos
             return config.cheri_sdk_bindir / "clang"
         return config.clang_path
 
     @staticmethod
-    def host_cxx_compiler(config: "CheriConfig") -> Path:
+    def host_cxx_compiler(config: CheriConfig) -> Path:
         if config.use_sdk_clang_for_native_xbuild and not OSInfo.IS_MAC:
             # SDK clang doesn't work for native builds on macos
             return config.cheri_sdk_bindir / "clang++"
         return config.clang_plusplus_path
 
     @staticmethod
-    def host_c_preprocessor(config: "CheriConfig") -> Path:
+    def host_c_preprocessor(config: CheriConfig) -> Path:
         if config.use_sdk_clang_for_native_xbuild and not OSInfo.IS_MAC:
             # SDK clang doesn't work for native builds on macos
             return config.cheri_sdk_bindir / "clang-cpp"
@@ -392,34 +457,16 @@ class TargetInfo(ABC):
                 str(prefix / "libdata/pkgconfig")]
 
 
-# https://reviews.llvm.org/rG14daa20be1ad89639ec209d969232d19cf698845
-class AutoVarInit(Enum):
-    NONE = "none"
-    ZERO = "zero"
-    PATTERN = "pattern"
-
-    def clang_flags(self) -> "typing.List[str]":
-        if self is None:
-            return []  # Equivalent to -ftrivial-auto-var-init=uninitialized
-        elif self is AutoVarInit.ZERO:
-            return ["-ftrivial-auto-var-init=zero",
-                    "-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang"]
-        elif self is AutoVarInit.PATTERN:
-            return ["-ftrivial-auto-var-init=pattern"]
-        else:
-            raise NotImplementedError()
-
-
 class NativeTargetInfo(TargetInfo):
-    shortname = "native"
-    os_prefix = ""  # Don't add an extra -native to target names
+    shortname: str = "native"
+    os_prefix: str = ""  # Don't add an extra -native to target names
 
     @property
-    def sdk_root_dir(self):
+    def sdk_root_dir(self) -> Path:
         raise ValueError("Should not be called for native")
 
     @property
-    def sysroot_dir(self):
+    def sysroot_dir(self) -> Path:
         raise ValueError("Should not be called for native")
 
     @property
@@ -427,11 +474,11 @@ class NativeTargetInfo(TargetInfo):
         raise ValueError("Should not be called for native")
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
         raise ValueError("Should not be called for native")
 
     @classmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
         if config.use_sdk_clang_for_native_xbuild:
             return ["llvm-native"]
         return []  # use host tools -> no target needed
@@ -479,27 +526,27 @@ class NativeTargetInfo(TargetInfo):
         return self.c_compiler.parent / "strip"
 
     @classmethod
-    def is_freebsd(cls):
+    def is_freebsd(cls) -> bool:
         return OSInfo.IS_FREEBSD
 
     @classmethod
-    def is_cheribsd(cls):
+    def is_cheribsd(cls) -> bool:
         return OSInfo.is_cheribsd()
 
     @classmethod
-    def is_macos(cls):
+    def is_macos(cls) -> bool:
         return OSInfo.IS_MAC
 
     @classmethod
-    def is_linux(cls):
+    def is_linux(cls) -> bool:
         return OSInfo.IS_LINUX
 
     @classmethod
-    def is_native(cls):
+    def is_native(cls) -> bool:
         return True
 
     @property
-    def default_libdir(self):
+    def default_libdir(self) -> str:
         if OSInfo.is_ubuntu() or OSInfo.is_debian():
             # Ubuntu and Debian default to installing to lib/<triple> directories
             if self.target.is_x86_64():
@@ -510,15 +557,46 @@ class NativeTargetInfo(TargetInfo):
             return "lib64"
         return "lib"
 
+    @cached_property
+    def _compat_abi_suffix(self) -> str:
+        assert self.is_freebsd()
+        # Directory suffix for compat ABI (currently only "64"/"" should be valid)
+        if _is_native_purecap() and not self.target.is_cheri_purecap():
+            return "64"
+        assert _is_native_purecap() == self.target.is_cheri_purecap(), \
+            "Building purecap natively is only supported on purecap installations"
+        return ""
+
+    @property
+    def localbase(self) -> Path:
+        if self.is_freebsd():
+            # Use /usr/local64 for hybrid/non-CHERI targets on purecap CheriBSD.
+            return Path(f"/usr/local{self._compat_abi_suffix}")
+        raise NotImplementedError("Should only be called for FreeBSD targets")
+
+    @cached_property
+    def pkg_config_libdir_override(self) -> "typing.Optional[str]":
+        if OSInfo.is_cheribsd():
+            # When building natively on CheriBSD with pkg-config installed using pkg64, the default pkg-config
+            # search path will use the non-CHERI libraries in /usr/local64. We could avoid this override in cases
+            # where the pkg-config localbase matches the current localbase, but always overriding it is simpler (and
+            # also handles cases such as a self-built pkg-config).
+            if self._compat_abi_suffix:
+                return f"{self.localbase}/libdata/pkgconfig:/usr/lib{self._compat_abi_suffix}/pkgconfig"
+            return "/usr/local/libdata/pkgconfig:/usr/libdata/pkgconfig"
+        return None  # use the default value for non-CheriBSD
+
     @property
     def pkgconfig_dirs(self) -> "typing.List[str]":
         # We need to add the bootstrap tools pkgconfig dirs to PKG_CONFIG_PATH to find e.g. libxml2, etc.
         # Note: some packages also install to libdata/pkgconfig or share/pkgconfig
+        # NB: We don't want to look in this directory when building forced hybrid targets such as GDB:
+        if _is_native_purecap() and not self.target.is_cheri_purecap():
+            return []
         return self.pkgconfig_candidates(self.config.other_tools_dir)
 
-    @property
-    def cmake_prefix_paths(self) -> "list[Path]":
-        return [self.config.other_tools_dir]
+    def cmake_prefix_paths(self, config: "CheriConfig") -> "list[Path]":
+        return [config.other_tools_dir]
 
     def pkgconfig_candidates(self, prefix: Path) -> "list[str]":
         result = super().pkgconfig_candidates(prefix)
@@ -530,7 +608,7 @@ class NativeTargetInfo(TargetInfo):
     @classmethod
     def essential_compiler_and_linker_flags_impl(cls, instance: "TargetInfo", *, xtarget: "CrossCompileTarget",
                                                  perform_sanity_checks=True, default_flags_only=False,
-                                                 softfloat: bool = None):
+                                                 softfloat: bool = None) -> "list[str]":
         result = []
         if instance.project.auto_var_init != AutoVarInit.NONE:
             compiler = instance.project.get_compiler_info(instance.c_compiler)
@@ -545,61 +623,29 @@ class NativeTargetInfo(TargetInfo):
             else:
                 instance.project.fatal("Requested automatic variable initialization, but don't know how to for",
                                        compiler)
+        if xtarget.is_cheri_hybrid():
+            if xtarget.is_aarch64(include_purecap=True):
+                result.append("-mabi=aapcs")
+            else:
+                instance.project.fatal("-native-hybrid not supported yet for non-Morello targets")
         return result  # default host compiler should not need any extra flags
-
-
-class Linkage(Enum):
-    DEFAULT = "default"
-    STATIC = "static"
-    DYNAMIC = "dynamic"
-
-
-class MipsFloatAbi(Enum):
-    SOFT = ("mips64", "-msoft-float")
-    HARD = ("mips64hf", "-mhard-float")
-
-    def freebsd_target_arch(self):
-        return self.value[0]
-
-    def clang_float_flag(self):
-        return self.value[1]
-
-
-class AArch64FloatSimdOptions(Enum):
-    DEFAULT = ("", "")
-    NOSIMD = ("-nosimd", "+nosimd")
-    SOFT = ("-softfp", "+nofp+nosimd")
-    SOFT_SIMD = ("-softfp-with-simd", "+nofp")  # TODO: does it make sense to have this?
-
-    def config_suffix(self):
-        return self.value[0]
-
-    def clang_march_flag(self):
-        return self.value[1]
 
 
 class CrossCompileTarget(object):
     # Currently the same for all targets
-    DEFAULT_SUBOBJECT_BOUNDS = "conservative"
+    DEFAULT_SUBOBJECT_BOUNDS: str = "conservative"
 
-    def __init__(self, suffix: "typing.Union[str, typing.Tuple[str, str]]", cpu_architecture: CPUArchitecture,
-                 target_info_cls: "typing.Type[TargetInfo]", *, is_cheri_purecap=False, is_cheri_hybrid=False,
+    def __init__(self, arch_suffix: str, cpu_architecture: CPUArchitecture, target_info_cls: "typing.Type[TargetInfo]",
+                 *, is_cheri_purecap=False, is_cheri_hybrid=False, extra_target_suffix: str = "",
                  check_conflict_with: "CrossCompileTarget" = None, rootfs_target: "CrossCompileTarget" = None,
                  non_cheri_target: "CrossCompileTarget" = None, hybrid_target: "CrossCompileTarget" = None,
                  purecap_target: "CrossCompileTarget" = None,
                  non_cheri_for_hybrid_rootfs_target: "CrossCompileTarget" = None,
                  non_cheri_for_purecap_rootfs_target: "CrossCompileTarget" = None,
                  hybrid_for_purecap_rootfs_target: "CrossCompileTarget" = None,
-                 purecap_for_hybrid_rootfs_target: "CrossCompileTarget" = None):
-        if isinstance(suffix, tuple):
-            assert len(suffix) == 2
-            arch_suffix = suffix[0]
-            extra_target_suffix = "-" + suffix[1] if suffix[1] else ""
-        else:
-            arch_suffix = suffix
-            extra_target_suffix = ""
+                 purecap_for_hybrid_rootfs_target: "CrossCompileTarget" = None) -> None:
         assert not arch_suffix.startswith("-"), arch_suffix
-
+        assert not extra_target_suffix or extra_target_suffix.startswith("-"), extra_target_suffix
         name_prefix = target_info_cls.shortname
         if target_info_cls.os_prefix is not None:
             self.os_prefix = target_info_cls.os_prefix
@@ -628,6 +674,10 @@ class CrossCompileTarget(object):
         self._non_cheri_for_purecap_rootfs_target = non_cheri_for_purecap_rootfs_target
         self._hybrid_for_purecap_rootfs_target = hybrid_for_purecap_rootfs_target
         self._purecap_for_hybrid_rootfs_target = purecap_for_hybrid_rootfs_target
+        if typing.TYPE_CHECKING:
+            # Inferring what these function calls do takes a very long time in pytype, and since they don't add any
+            # instance variables (or change the type of them) we can skip over these calls.
+            return
         self._set_for(non_cheri_target)
         self._set_for(hybrid_target)
         self._set_for(purecap_target)
@@ -636,38 +686,19 @@ class CrossCompileTarget(object):
         self._set_for(hybrid_for_purecap_rootfs_target)
         self._set_for(purecap_for_hybrid_rootfs_target)
 
-    # noinspection PyProtectedMember
-    def _set_from(self, other_target: "CrossCompileTarget"):
+    def _set_from(self, other_target: "CrossCompileTarget") -> None:
         if self is other_target:
             return
-        if self._hybrid_target is None and other_target._hybrid_target is not None:
-            self._hybrid_target = other_target._hybrid_target
-            other_target._hybrid_target._set_from(self)
-        if self._non_cheri_target is None and other_target._non_cheri_target is not None:
-            self._non_cheri_target = other_target._non_cheri_target
-            other_target._non_cheri_target._set_from(self)
-        if self._purecap_target is None and other_target._purecap_target is not None:
-            self._purecap_target = other_target._purecap_target
-            other_target._purecap_target._set_from(self)
-        if self._non_cheri_for_hybrid_rootfs_target is None and \
-           other_target._non_cheri_for_hybrid_rootfs_target is not None:
-            self._non_cheri_for_hybrid_rootfs_target = other_target._non_cheri_for_hybrid_rootfs_target
-            other_target._non_cheri_for_hybrid_rootfs_target._set_from(self)
-        if self._non_cheri_for_purecap_rootfs_target is None and \
-           other_target._non_cheri_for_purecap_rootfs_target is not None:
-            self._non_cheri_for_purecap_rootfs_target = other_target._non_cheri_for_purecap_rootfs_target
-            other_target._non_cheri_for_purecap_rootfs_target._set_from(self)
-        if self._hybrid_for_purecap_rootfs_target is None and \
-           other_target._hybrid_for_purecap_rootfs_target is not None:
-            self._hybrid_for_purecap_rootfs_target = other_target._hybrid_for_purecap_rootfs_target
-            other_target._hybrid_for_purecap_rootfs_target._set_from(self)
-        if self._purecap_for_hybrid_rootfs_target is None and \
-           other_target._purecap_for_hybrid_rootfs_target is not None:
-            self._purecap_for_hybrid_rootfs_target = other_target._purecap_for_hybrid_rootfs_target
-            other_target._purecap_for_hybrid_rootfs_target._set_from(self)
+        for attr in ("_hybrid_target", "_non_cheri_target", "_purecap_target", "_non_cheri_for_hybrid_rootfs_target",
+                     "_non_cheri_for_purecap_rootfs_target", "_hybrid_for_purecap_rootfs_target",
+                     "_purecap_for_hybrid_rootfs_target"):
+            if getattr(self, attr) is None and getattr(other_target, attr) is not None:
+                setattr(self, attr, getattr(other_target, attr))
+                # noinspection PyProtectedMember
+                getattr(other_target, attr)._set_from(self)
 
     # Set the related targets:
-    def _set_for(self, other_target: "typing.Optional[CrossCompileTarget]", also_set_other=True):
+    def _set_for(self, other_target: "typing.Optional[CrossCompileTarget]", also_set_other=True) -> None:
         if other_target is not None and self is not other_target:
             if self._is_cheri_hybrid:
                 if self._rootfs_target is not None:
@@ -716,16 +747,16 @@ class CrossCompileTarget(object):
                 other_target._set_for(self, also_set_other=False)
             other_target._set_from(self)
 
-    def create_target_info(self, project: "SimpleProject") -> TargetInfo:
+    def create_target_info(self, project: AbstractProject) -> TargetInfo:
         return self.target_info_cls(self, project)
 
-    def build_suffix(self, config: "CheriConfig", *, include_os: bool):
+    def build_suffix(self, config: CheriConfig, *, include_os: bool) -> str:
         assert self.target_info_cls is not None
         target_suffix = self.generic_target_suffix if include_os else self.base_target_suffix
         result = "-" + target_suffix + self.cheri_config_suffix(config)
         return result
 
-    def cheri_config_suffix(self, config: "CheriConfig"):
+    def cheri_config_suffix(self, config: CheriConfig) -> str:
         """
         :return: a string such as "-subobject-safe"/"128"/"128-plt" to ensure different build/install dirs for config
         options
@@ -748,12 +779,12 @@ class CrossCompileTarget(object):
             result += "-" + config.cross_target_suffix
         return result
 
-    def is_native(self):
+    def is_native(self) -> bool:
         """returns true if we are building for the curent host"""
         assert self.target_info_cls is not None
         return self.target_info_cls.is_native()
 
-    def _check_arch(self, arch: CPUArchitecture, include_purecap: "typing.Optional[bool]"):
+    def _check_arch(self, arch: CPUArchitecture, include_purecap: "typing.Optional[bool]") -> bool:
         if self.cpu_architecture is not arch:
             return False
         if include_purecap is None:
@@ -764,31 +795,31 @@ class CrossCompileTarget(object):
         return True
 
     # Querying the CPU architecture:
-    def is_mips(self, include_purecap: bool = None):
+    def is_mips(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.MIPS64, include_purecap)
 
-    def is_riscv32(self, include_purecap: bool = None):
+    def is_riscv32(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.RISCV32, include_purecap)
 
-    def is_riscv64(self, include_purecap: bool = None):
+    def is_riscv64(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.RISCV64, include_purecap)
 
-    def is_riscv(self, include_purecap: bool = None):
+    def is_riscv(self, include_purecap: bool = None) -> bool:
         return self.is_riscv32(include_purecap) or self.is_riscv64(include_purecap)
 
-    def is_aarch64(self, include_purecap: bool = None):
+    def is_aarch64(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.AARCH64, include_purecap)
 
-    def is_i386(self, include_purecap: bool = None):
+    def is_i386(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.I386, include_purecap)
 
-    def is_x86_64(self, include_purecap: bool = None):
+    def is_x86_64(self, include_purecap: bool = None) -> bool:
         return self._check_arch(CPUArchitecture.X86_64, include_purecap)
 
-    def is_any_x86(self, include_purecap: bool = None):
+    def is_any_x86(self, include_purecap: bool = None) -> bool:
         return self.is_i386(include_purecap) or self.is_x86_64(include_purecap)
 
-    def is_cheri_purecap(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None):
+    def is_cheri_purecap(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
         if valid_cpu_archs is None:
             return self._is_cheri_purecap
         if not self._is_cheri_purecap:
@@ -799,7 +830,7 @@ class CrossCompileTarget(object):
                 return True
         return False
 
-    def is_cheri_hybrid(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None):
+    def is_cheri_hybrid(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
         if valid_cpu_archs is None:
             return self._is_cheri_hybrid
         if not self._is_cheri_hybrid:
@@ -810,7 +841,7 @@ class CrossCompileTarget(object):
                 return True
         return False
 
-    def is_hybrid_or_purecap_cheri(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None):
+    def is_hybrid_or_purecap_cheri(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
         return self.is_cheri_purecap(valid_cpu_archs) or self.is_cheri_hybrid(valid_cpu_archs)
 
     def get_rootfs_target(self) -> "CrossCompileTarget":
@@ -872,7 +903,7 @@ class CrossCompileTarget(object):
             return self._purecap_for_hybrid_rootfs_target
         raise ValueError("Don't know CHERI purecap for hybrid rootfs version of " + repr(self))
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         result = self.target_info_cls.__name__ + "(" + self.cpu_architecture.name
         if self._is_cheri_purecap:
             result += " purecap"
@@ -885,7 +916,7 @@ class CrossCompileTarget(object):
             result += " rootfs"
         return result
 
-    def _dump_target_relations(self):
+    def _dump_target_relations(self) -> None:
         self_repr = repr(self)
         for n in ('non_cheri', 'hybrid', 'purecap', 'non_cheri_for_hybrid_rootfs', 'non_cheri_for_purecap_rootfs',
                   'hybrid_for_purecap_rootfs', 'purecap_for_hybrid_rootfs'):
@@ -897,6 +928,7 @@ class CrossCompileTarget(object):
     #     raise NotImplementedError("Should not compare to CrossCompileTarget, use the is_foo() methods.")
 
 
+@functools.lru_cache(maxsize=1)
 def _native_cpu_arch() -> CPUArchitecture:
     machine = platform.machine()
     if machine in ("amd64", "x86_64"):
@@ -909,17 +941,24 @@ def _native_cpu_arch() -> CPUArchitecture:
         return CPUArchitecture.X86_64
 
 
-def _native_target_kwargs() -> dict:
-    if OSInfo.is_cheribsd() and platform.processor() in ("aarch64c", "riscv64c"):
-        # TODO: should we check if `cc -E -dM -xc /dev/null` contains __CHERI_PURE_CAPABILITY__ instead?
-        return dict(is_cheri_purecap=True)
-    return dict()
+@functools.lru_cache(maxsize=1)
+def _is_native_purecap():
+    # TODO: should we check if `cc -E -dM -xc /dev/null` contains __CHERI_PURE_CAPABILITY__ instead?
+    return OSInfo.is_cheribsd() and platform.processor() in ("aarch64c", "riscv64c")
 
 
 # This is a separate class to avoid cyclic dependencies.
 # The real list is in CompilationTargets in compilation_targets.py
 class BasicCompilationTargets:
-    NATIVE = CrossCompileTarget("native", _native_cpu_arch(), NativeTargetInfo, **_native_target_kwargs())
+    # Some projects (LLVM, QEMU, GDB, etc.) don't build as purecap binaries, so we have to build them hybrid instead.
+    if _is_native_purecap():
+        NATIVE = CrossCompileTarget("native", _native_cpu_arch(), NativeTargetInfo, is_cheri_purecap=True)
+        NATIVE_HYBRID = CrossCompileTarget("native-hybrid", _native_cpu_arch(), NativeTargetInfo, is_cheri_hybrid=True,
+                                           purecap_target=NATIVE, check_conflict_with=NATIVE)
+        NATIVE_NON_PURECAP = NATIVE_HYBRID
+    else:
+        NATIVE = CrossCompileTarget("native", _native_cpu_arch(), NativeTargetInfo)
+        NATIVE_NON_PURECAP = NATIVE
     NATIVE_IF_FREEBSD = [NATIVE] if OSInfo.IS_FREEBSD else []
     NATIVE_IF_LINUX = [NATIVE] if OSInfo.IS_LINUX else []
     NATIVE_IF_MACOS = [NATIVE] if OSInfo.IS_MAC else []

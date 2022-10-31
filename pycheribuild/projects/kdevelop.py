@@ -27,7 +27,9 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-from .project import BuildType, CheriConfig, CMakeProject, DefaultInstallDir, GitRepository, SimpleProject
+from .cmake_project import CMakeProject
+from .project import BuildType, CheriConfig, DefaultInstallDir, GitRepository
+from .simple_project import SimpleProject
 
 
 # doesn't seem to be part of distro packages

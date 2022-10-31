@@ -32,11 +32,11 @@ from pathlib import Path
 
 from .cross.crosscompileproject import CrossCompileMakefileProject
 from .cross.gdb import BuildGDB
-from .project import (DefaultInstallDir, GitRepository, MakefileProject, Project,
-                      ReuseOtherProjectDefaultTargetRepository, SimpleProject)
+from .project import (DefaultInstallDir, GitRepository, MakefileProject, Project, ComputedDefaultValue,
+                      ReuseOtherProjectDefaultTargetRepository)
+from .simple_project import SimpleProject
 from ..config.chericonfig import BuildType, CheriConfig
 from ..config.compilation_targets import CompilationTargets
-from ..config.loader import ComputedDefaultValue
 from ..utils import OSInfo
 
 
@@ -51,10 +51,6 @@ class ArmNoneEabiToolchain(SimpleProject):
     def is_toolchain_target(cls):
         return True
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.add_required_system_tool("wget")
-
     def process(self):
         url_prefix = "https://developer.arm.com/-/media/Files/downloads/gnu-rm/9-2020q2/"
         filename = None
@@ -67,7 +63,9 @@ class ArmNoneEabiToolchain(SimpleProject):
             else:
                 self.fatal("Unsupported CPU architecture")
         elif self.target_info.is_macos():
-            assert self.crosscompile_target.is_x86_64(), "Assumes x86_64"
+            # XXX: Works fine with Rosetta...
+            if not self.crosscompile_target.is_x86_64():
+                self.fatal("Unsupported CPU architecture")
             filename = "gcc-arm-none-eabi-9-2020-q2-update-mac.tar.bz2"
         if filename is None:
             self.fatal("Cannot infer download URL for current OS:", platform.platform(),
@@ -75,7 +73,7 @@ class ArmNoneEabiToolchain(SimpleProject):
                                   "developer-tools/gnu-toolchain/gnu-rm/downloads and select the appropriate download.")
             return
         if not (self.config.build_root / filename).is_file() or self.with_clean:
-            self.run_cmd("wget", url_prefix + filename, "-O", self.config.build_root / filename)
+            self.download_file(self.config.build_root / filename, url_prefix + filename, "-O")
         with self.async_clean_directory(self.config.output_root / self.config.local_arm_none_eabi_toolchain_relpath):
             self.run_cmd(["tar", "xf", self.config.build_root / filename, "--strip-components", "1", "-C",
                           self.config.output_root / self.config.local_arm_none_eabi_toolchain_relpath])

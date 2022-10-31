@@ -71,7 +71,7 @@ SUPPORTED_ARCHITECTURES = {x.generic_target_suffix: x for x in (CompilationTarge
                                                                 CompilationTargets.CHERIBSD_MORELLO_PURECAP,
                                                                 )}
 
-AUTOBOOT_PROMPT = re.compile(r"(H|, h)it \[Enter\] to boot ")
+AUTOBOOT_PROMPT = re.compile(r"(H|, h)it \[Enter] to boot ")
 BOOT_LOADER_PROMPT = "OK "
 
 STARTING_INIT = "start_init: trying /sbin/init"
@@ -331,7 +331,7 @@ class QemuCheriBSDInstance(CheriBSDInstance):
         return result
 
     def run_command_via_ssh(self, command: typing.List[str], *, stdout=None, stderr=None, check=True, verbose=False,
-                            use_controlmaster=False, **kwargs) -> subprocess.CompletedProcess:
+                            use_controlmaster=False, **kwargs) -> "subprocess.CompletedProcess[bytes]":
         assert self.ssh_port is not None
         ssh_command = ["ssh", "{user}@{host}".format(user=self.ssh_user, host="localhost"),
                        "-p", str(self.ssh_port),
@@ -699,11 +699,9 @@ class FakeQemuSpawn(QemuCheriBSDInstance):
         pass
 
     def run(self, cmd, **kwargs):
-        # noinspection PyTypeChecker
         run_cheribsd_command(self, cmd, **kwargs)
 
     def checked_run(self, cmd, **kwargs):
-        # noinspection PyTypeChecker
         checked_run_cheribsd_command(self, cmd, **kwargs)
 
     def check_ssh_connection(self, prefix="SSH connection:"):
@@ -834,6 +832,7 @@ def boot_and_login(child: CheriBSDSpawnMixin, *, starttime, kernel_init_only=Fal
         # BOOTVERBOSE is off for the amd64 kernel, so we don't see the STARTING_INIT message
         # TODO: it would be nice if we had a message to detect userspace startup without requiring bootverbose
         bootverbose = False
+        # noinspection PyTypeChecker
         init_messages = [STARTING_INIT, BOOT_FAILURE, BOOT_FAILURE2, BOOT_FAILURE3] + FATAL_ERROR_MESSAGES
         boot_messages = init_messages + [TRYING_TO_MOUNT_ROOT]
         loader_boot_prompt_messages = boot_messages + [BOOT_LOADER_PROMPT]
@@ -1139,7 +1138,6 @@ def get_argument_parser() -> argparse.ArgumentParser:
                              "LD_PRELOAD or LD_CHERI_PRELOAD")
     parser.add_argument("--test-timeout", "-tt", type=int, default=60 * 60,
                         help="Timeout in seconds for running tests")
-    # noinspection PyTypeChecker
     parser.add_argument("--qemu-logfile", help="File to write all interactions with QEMU to", type=Path)
     parser.add_argument("--test-environment-only", action="store_true",
                         help="Setup mount paths + SSH for tests but don't actually run the tests (implies --interact)")
@@ -1344,8 +1342,8 @@ def _main(test_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace]
         sys.exit(2)  # different exit code for test failures
 
 
-def main(test_function: "typing.Callable[[QemuCheriBSDInstance, argparse.Namespace], bool]" = None,
-         test_setup_function: "typing.Callable[[QemuCheriBSDInstance, argparse.Namespace], None]" = None,
+def main(test_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace], bool]" = None,
+         test_setup_function: "typing.Callable[[CheriBSDInstance, argparse.Namespace], None]" = None,
          argparse_setup_callback: "typing.Callable[[argparse.ArgumentParser], None]" = None,
          argparse_adjust_args_callback: "typing.Callable[[argparse.Namespace], None]" = None):
     # Some programs (such as QEMU) can mess up the TTY state if they don't exit cleanly

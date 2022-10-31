@@ -32,6 +32,7 @@
 import os
 
 from .crosscompileproject import CheriConfig, CompilationTargets, CrossCompileProject, DefaultInstallDir, GitRepository
+from ..run_qemu import LaunchQEMUBase
 
 
 class BuildRtems(CrossCompileProject):
@@ -81,3 +82,25 @@ class BuildRtems(CrossCompileProject):
                           CFLAGS="--sysroot=" + str(self.sdk_sysroot),
                           LDFLAGS="--sysroot=" + str(self.sdk_sysroot)):
             super().process()
+
+
+class LaunchRtemsQEMU(LaunchQEMUBase):
+    target = "run-rtems"
+    dependencies = ["rtems"]
+    supported_architectures = [CompilationTargets.RTEMS_RISCV64_PURECAP]
+    forward_ssh_port = False
+    qemu_user_networking = False
+    _enable_smbfs_support = False
+    _add_virtio_rng = False
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.kernel_project = BuildRtems.get_instance(self)
+        self.current_kernel = self.kernel_project.build_dir / "riscv/rv64xcheri_qemu/testsuites/samples/capture.exe"
+
+    def get_riscv_bios_args(self) -> "list[str]":
+        # Run a simple RTEMS shell application (run in machine mode using the -bios none)
+        return ["-bios", "none"]
+
+    def process(self):
+        super().process()

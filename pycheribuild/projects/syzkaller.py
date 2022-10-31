@@ -31,12 +31,14 @@
 
 import json
 import os
+from pathlib import Path
 
 from .build_qemu import BuildQEMU
 from .cross.cheribsd import BuildCHERIBSD, ConfigPlatform, CheriBSDConfigTable
 from .cross.crosscompileproject import CompilationTargets, CrossCompileProject
 from .disk_image import BuildCheriBSDDiskImage
-from .project import DefaultInstallDir, GitRepository, MakeCommandKind, SimpleProject
+from .project import DefaultInstallDir, GitRepository, MakeCommandKind
+from .simple_project import SimpleProject
 from ..processutils import commandline_to_str
 from ..qemu_utils import QemuOptions
 from ..utils import ThreadJoiner
@@ -66,7 +68,7 @@ class BuildSyzkaller(CrossCompileProject):
     def __init__(self, config):
         self._install_prefix = config.cheri_sdk_dir
         self._install_dir = config.cheri_sdk_dir
-        self.destdir = ""
+        self.destdir = Path("")
         super().__init__(config)
 
         # self.gopath = source_base / gohome
@@ -81,7 +83,7 @@ class BuildSyzkaller(CrossCompileProject):
         self._new_path = (str(self.config.cheri_sdk_dir / "bin") + ":" +
                           str(self.config.dollar_path_with_other_tools))
 
-        cheribsd_target = self.get_crosscompile_target(config).get_rootfs_target()
+        cheribsd_target = self.get_crosscompile_target().get_rootfs_target()
         self.cheribsd_dir = BuildCHERIBSD.get_source_dir(self, cross_target=cheribsd_target)
 
     def syzkaller_install_path(self):
@@ -179,8 +181,9 @@ class RunSyzkaller(SimpleProject):
             xtarget = syzkaller.crosscompile_target.get_cheri_purecap_target()
             qemu_binary = BuildQEMU.qemu_binary(self, xtarget=xtarget)
             kernel_project = BuildCHERIBSD.get_instance(self, cross_target=xtarget)
-            kernel_config = CheriBSDConfigTable.get_configs(xtarget, ConfigPlatform.QEMU,
-                                                            kernel_project.get_default_kernel_abi(), fuzzing=True)
+            kernel_config = CheriBSDConfigTable.get_configs(xtarget, platform=ConfigPlatform.QEMU,
+                                                            kABI=kernel_project.get_default_kernel_abi(),
+                                                            fuzzing=True)
             if len(kernel_config) == 0:
                 self.fatal("No kcov kernel configuration found")
                 return
@@ -200,7 +203,7 @@ class RunSyzkaller(SimpleProject):
             qemu_opts = QemuOptions(self.crosscompile_target)
             template = {
                 "name": "cheribsd-n64",
-                "target": "freebsd/" + self.crosscompile_target.cpu_architecture.value,
+                "target": "freebsd/" + str(self.crosscompile_target.cpu_architecture.value),
                 "http": ":10000",
                 "rpc": ":10001",
                 "workdir": str(self.syz_workdir),

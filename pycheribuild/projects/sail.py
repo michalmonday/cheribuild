@@ -36,11 +36,11 @@ from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Any, Dict, Tuple, Union
 
-from .project import (AutotoolsProject, CheriConfig, DefaultInstallDir, GitRepository, MakeCommandKind, Project,
-                      SimpleProject)
+from .project import AutotoolsProject, CheriConfig, DefaultInstallDir, GitRepository, MakeCommandKind, Project
+from .simple_project import SimpleProject
 from ..processutils import get_program_version
 from ..targets import target_manager
-from ..utils import AnsiColour, coloured, OSInfo, ThreadJoiner
+from ..utils import AnsiColour, coloured, OSInfo, ThreadJoiner, InstallInstructions
 
 if typing.TYPE_CHECKING:
     _MixinBase = Project
@@ -151,7 +151,6 @@ class Opam2(SimpleProject):
     def __init__(self, config):
         super().__init__(config)
         if OSInfo.IS_LINUX:
-            self.add_required_system_tool("wget")
             self.add_required_system_tool("bwrap", cheribuild_target="bubblewrap")
 
     def process(self):
@@ -177,7 +176,6 @@ class BuildBubbleWrap(AutotoolsProject):
     def __init__(self, config):
         super().__init__(config)
         self.add_required_system_header("sys/capability.h", apt="libcap-dev")
-        self.configure_command = self.source_dir / "autogen.sh"
         self.configure_args.append("--with-bash-completion-dir=no")
 
 
@@ -272,7 +270,8 @@ class BuildSailCheriMips(ProjectUsingOpam):
     def compile(self, **kwargs):
         if self.with_trace_support:
             self.make_args.set(TRACE="yes")
-        cmd = [self.make_args.command, self.config.make_j_flag, "all"] + self.make_args.all_commandline_args
+        cmd = [self.make_args.command, self.config.make_j_flag,
+               "all"] + self.make_args.all_commandline_args(self.config)
         self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -316,7 +315,7 @@ class BuildSailRISCV(ProjectUsingOpam):
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
             cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch,
-                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args
+                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args(self.config)
             self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -340,7 +339,7 @@ class BuildSailCheriRISCV(ProjectUsingOpam):
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
             cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch,
-                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args
+                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args(self.config)
             self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -367,7 +366,7 @@ class OcamlProject(OpamMixin, Project):
                 self.run_in_ocaml_env("ocamlfind query " + shlex.quote(pkg), cwd="/", print_verbose_only=True)
             except CalledProcessError:
                 instrs = "Try running `" + self._opam_cmd_str("install", _add_switch=False) + " " + pkg + "`"
-                self.dependency_error("missing opam package " + pkg, install_instructions=instrs)
+                self.dependency_error("missing opam package " + pkg, install_instructions=InstallInstructions(instrs))
 
     def install(self, **kwargs):
         pass
@@ -382,7 +381,8 @@ class OcamlProject(OpamMixin, Project):
             hint = "Try running `" + self._opam_cmd_str("update", _add_switch=False) + " && " + self._opam_cmd_str(
                 "switch", _add_switch=False) + " " + self.required_ocaml_version + "`"
             self.dependency_error("OCaml env seems to be messed up. Note: On MacOS homebrew OCaml is not installed"
-                                  " correctly. Try installing it with opam instead:", install_instructions=hint)
+                                  " correctly. Try installing it with opam instead:",
+                                  install_instructions=InstallInstructions(hint))
         super().process()
 
 
@@ -405,7 +405,7 @@ class BuildSailFromSource(OcamlProject):
             self.run_in_ocaml_env("ocamlfind query menhirLib", cwd="/", print_verbose_only=True)
         except CalledProcessError:
             self.dependency_error("missing opam package menhirLib",
-                                  install_instructions="Try running `opam install menhir`")
+                                  install_instructions=InstallInstructions("Try running `opam install menhir`"))
 
     def compile(self, **kwargs):
         pass

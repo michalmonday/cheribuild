@@ -39,15 +39,13 @@ from pathlib import Path
 from .build_qemu import BuildQEMU, BuildQEMUBase, BuildUpstreamQEMU
 from .cherios import BuildCheriOS
 from .cross.cheribsd import BuildCHERIBSD, BuildCheriBsdMfsKernel, BuildFreeBSD, ConfigPlatform, KernelABI
-from .cross.freertos import BuildFreeRTOS
 from .cross.gdb import BuildGDB
-from .cross.rtems import BuildRtems
 from .cross.u_boot import BuildUBoot
 from .disk_image import (BuildCheriBSDDiskImage, BuildDiskImageBase, BuildFreeBSDImage,
                          BuildFreeBSDWithDefaultOptionsDiskImage, BuildMinimalCheriBSDDiskImage)
-from .project import CheriConfig, CPUArchitecture, SimpleProject, TargetAliasWithDependencies
+from .project import CheriConfig, CPUArchitecture, Project, ComputedDefaultValue
+from .simple_project import SimpleProject, TargetAliasWithDependencies
 from ..config.compilation_targets import CompilationTargets
-from ..config.loader import ComputedDefaultValue
 from ..qemu_utils import qemu_supports_9pfs, QemuOptions, riscv_bios_arguments
 from ..utils import AnsiColour, classproperty, coloured, find_free_port, OSInfo
 
@@ -134,6 +132,8 @@ class LaunchQEMUBase(SimpleProject):
     _cached_chosen_qemu = None  # type: typing.Optional[ChosenQEMU]
     use_qemu: QEMUType
     custom_qemu_path: Path
+    kernel_project: typing.Optional[Project] = None
+    disk_image_project: typing.Optional[Project] = None
 
     @classmethod
     def setup_config_options(cls, default_ssh_port: int = None, **kwargs):
@@ -207,7 +207,7 @@ class LaunchQEMUBase(SimpleProject):
         if cls._cached_chosen_qemu:
             return cls._cached_chosen_qemu
 
-        xtarget = cls.get_crosscompile_target(config)
+        xtarget = cls.get_crosscompile_target()
         can_provide_src_via_smb = False
         supported_qemu_classes = []
         if xtarget.is_mips(include_purecap=True) or xtarget.is_riscv(include_purecap=True):
@@ -272,7 +272,7 @@ class LaunchQEMUBase(SimpleProject):
                 else:
                     # Only CHERI QEMU supports more than one SMB share
                     can_provide_src_via_smb = qemu_class == BuildQEMU
-                    qemu_binary = qemu_class.qemu_binary(cls, xtarget=xtarget, config=config)
+                    qemu_binary = qemu_class.qemu_binary(None, xtarget=xtarget, config=config)
 
         cls._cached_chosen_qemu = ChosenQEMU(qemu_class, qemu_binary, can_provide_src_via_smb)
         return cls._cached_chosen_qemu
@@ -309,8 +309,8 @@ class LaunchQEMUBase(SimpleProject):
                              "- falling back on kernel")
 
         if qemu_loader_or_kernel is not None and not qemu_loader_or_kernel.exists():
-            self.dependency_error("Loader/kernel is missing:", qemu_loader_or_kernel,
-                                  install_instructions="Run `cheribuild.py cheribsd` or `cheribuild.py run -d`.")
+            kernel_target = self.kernel_project.target if self.kernel_project is not None else None
+            self.dependency_error("Loader/kernel is missing:", qemu_loader_or_kernel, cheribuild_target=kernel_target)
 
         if self.forward_ssh_port and not self.is_port_available(self.ssh_forwarding_port):
             self.print_port_usage(self.ssh_forwarding_port)
@@ -348,8 +348,8 @@ class LaunchQEMUBase(SimpleProject):
         if self.cvtrace:
             logfile_options += ["-cheri-trace-format", "cvtrace"]
         if self.disk_image is not None and not self.disk_image.exists():
-            self.dependency_error("Disk image is missing:", self.disk_image,
-                                  install_instructions="Run `cheribuild.py disk-image` or `cheribuild.py run -d`.")
+            disk_image_target = self.disk_image_project.target if self.disk_image_project is not None else None
+            self.dependency_error("Disk image is missing:", self.disk_image, cheribuild_target=disk_image_target)
 
         user_network_options = ""
         smb_dir_count = 0
@@ -566,6 +566,8 @@ class LaunchQEMUBase(SimpleProject):
 
 class AbstractLaunchFreeBSD(LaunchQEMUBase):
     do_not_add_to_targets = True
+    kernel_project: typing.Optional[BuildFreeBSD]
+    disk_image_project: typing.Optional[BuildDiskImageBase]
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -584,17 +586,17 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
             help="Select extra kernel variant with the given ABI to run.")
 
     def __init__(self, config: CheriConfig, freebsd_class: "typing.Type[BuildFreeBSD]" = None,
-                 disk_image_class: "typing.Type[BuildFreeBSDImage]" = None, needs_disk_image=True):
+                 disk_image_class: "typing.Type[BuildDiskImageBase]" = None, needs_disk_image=True):
         super().__init__(config)
-        self.disk_image_class = disk_image_class
         if freebsd_class is None and disk_image_class is not None:
             # noinspection PyProtectedMember
             disk_image_instance = disk_image_class.get_instance(self)
-            self.source_project = disk_image_instance.source_project
+            self.disk_image_project = disk_image_instance
+            self.kernel_project = disk_image_instance.source_project
             if disk_image_instance.use_qcow2:
                 self.disk_image_format = "qcow2"
         else:
-            self.source_project = freebsd_class.get_instance(self)
+            self.kernel_project = freebsd_class.get_instance(self)
 
         if self.kernel_config:
             if self.kernel_config not in self._valid_kernel_configs():
@@ -607,25 +609,25 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
                     config_filters["kABI"] = self.kernel_abi
                 else:
                     self.warning("Can not select kernel ABI to run for non-CHERI target, ignoring --kernel-abi")
-            self.kernel_config = self.source_project.default_kernel_config(ConfigPlatform.QEMU, **config_filters)
+            self.kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, **config_filters)
 
         if self.qemu_options.can_boot_kernel_directly:
-            self.current_kernel = self.source_project.get_kernel_install_path(self.kernel_config)
-            kern_module_path_arg = self.source_project.get_kern_module_path_arg(self.kernel_config)
+            self.current_kernel = self.kernel_project.get_kernel_install_path(self.kernel_config)
+            kern_module_path_arg = self.kernel_project.get_kern_module_path_arg(self.kernel_config)
             if kern_module_path_arg:
                 self._project_specific_options += ["-append", kern_module_path_arg]
-        self.rootfs_path = self.source_project.get_rootfs_dir(self, config=config)
+        self.rootfs_path = self.kernel_project.get_rootfs_dir(self, config=config)
         if needs_disk_image:
             self.disk_image = disk_image_class.get_instance(self).disk_image_path
 
     def _valid_kernel_configs(self):
-        return self.source_project.get_kernel_configs(platform=ConfigPlatform.QEMU)
+        return self.kernel_project.get_kernel_configs(platform=ConfigPlatform.QEMU)
 
     def _list_kernel_configs(self):
         self.info("Available kernels for qemu:")
         for conf in self._valid_kernel_configs():
-            path = self.source_project.get_kernel_install_path(conf)
-            if conf == self.source_project.kernel_config:
+            path = self.kernel_project.get_kernel_install_path(conf)
+            if conf == self.kernel_project.kernel_config:
                 self.info("*", conf, path)
             else:
                 self.info(conf, path)
@@ -648,13 +650,15 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
 class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
     do_not_add_to_targets = True
     include_os_in_target_suffix = False
-    _freebsd_class = None  # type: typing.Type[BuildFreeBSD]
-    _source_class = None  # type: typing.Type[BuildDiskImageBase]
+    _freebsd_class: typing.Optional[BuildFreeBSD] = None
+    _disk_image_class: typing.Optional[BuildDiskImageBase] = None
     kyua_test_files = ("/usr/tests/Kyuafile",)
 
     @classproperty
     def supported_architectures(self):
-        return self._source_class.supported_architectures
+        if self._freebsd_class is not None:
+            return self._freebsd_class.supported_architectures
+        return self._disk_image_class.supported_architectures
 
     @classmethod
     def get_cross_target_index(cls, **kwargs):
@@ -667,26 +671,31 @@ class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
 
     @classproperty
     def default_architecture(self):
-        return self._source_class.default_architecture
+        if self._freebsd_class is not None:
+            return self._freebsd_class.default_architecture
+        return self._disk_image_class.default_architecture
 
     @classmethod
     def dependencies(cls: "typing.Type[_RunMultiArchFreeBSDImage]", config: CheriConfig) -> "list[str]":
-        xtarget = cls.get_crosscompile_target(config)
+        xtarget = cls.get_crosscompile_target()
         result = []
         chosen_qemu = cls.get_chosen_qemu(config)
         if chosen_qemu.cls:
             result.append(chosen_qemu.cls.target)
-        result.append(cls._source_class.get_class_for_target(xtarget).target)
+        if cls._freebsd_class is not None:
+            result.append(cls._freebsd_class.get_class_for_target(xtarget).target)
+        if cls._disk_image_class is not None:
+            result.append(cls._disk_image_class.get_class_for_target(xtarget).target)
         return result
 
     def __init__(self, config, *, needs_disk_image=True):
         super().__init__(config, needs_disk_image=needs_disk_image, freebsd_class=self._freebsd_class,
-                         disk_image_class=self._source_class.get_class_for_target(self.get_crosscompile_target(config)))
+                         disk_image_class=self._disk_image_class)
 
     def run_tests(self):
         rootfs_kernel_bootdir = None
         if not self.qemu_options.can_boot_kernel_directly:
-            rootfs_kernel_bootdir = self.source_project.get_kern_module_path(self.kernel_config)
+            rootfs_kernel_bootdir = self.kernel_project.get_kern_module_path(self.kernel_config)
         extra_args = []
         if self.kyua_test_files and "--kyua-tests-files" not in self.config.test_extra_args:
             extra_args.extend("--kyua-tests-files=" + x for x in self.kyua_test_files)
@@ -697,7 +706,7 @@ class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
 
 class LaunchCheriBSD(_RunMultiArchFreeBSDImage):
     target = "run"
-    _source_class = BuildCheriBSDDiskImage
+    _disk_image_class = BuildCheriBSDDiskImage
     kyua_test_files = tuple()  # don't run kyua tests by default for CheriBSD
 
     @classmethod
@@ -716,8 +725,7 @@ class LaunchCheriBSD(_RunMultiArchFreeBSDImage):
         result = super().dependencies(config)
         # RISCV needs OpenSBI/BBL to run:
         # Note: QEMU 4.2+ embeds opensbi, for CHERI, we have to use BBL (for now):
-        xtarget = cls.get_crosscompile_target(config)
-        if xtarget.is_hybrid_or_purecap_cheri([CPUArchitecture.RISCV64]):
+        if cls.get_crosscompile_target().is_hybrid_or_purecap_cheri([CPUArchitecture.RISCV64]):
             result.append("bbl-baremetal-riscv64-purecap")
         return result
 
@@ -738,7 +746,8 @@ class LaunchCheriOSQEMU(LaunchQEMUBase):
         super().__init__(config)
         # FIXME: these should be config options
         cherios = BuildCheriOS.get_instance(self, config)
-        self.current_kernel = BuildCheriOS.get_build_dir(self) / "boot/cherios.elf"
+        self.source_project = cherios
+        self.current_kernel = cherios.build_dir / "boot/cherios.elf"
         self.disk_image = self.config.output_root / "cherios-disk.img"
         self._project_specific_options = ["-no-reboot", "-global", "virtio-mmio.force-legacy=false"]
 
@@ -768,27 +777,6 @@ class LaunchCheriOSQEMU(LaunchQEMUBase):
         return ["-bios", "none"]
 
 
-class LaunchRtemsQEMU(LaunchQEMUBase):
-    target = "run-rtems"
-    dependencies = ["rtems"]
-    supported_architectures = [CompilationTargets.RTEMS_RISCV64_PURECAP]
-    forward_ssh_port = False
-    qemu_user_networking = False
-    _enable_smbfs_support = False
-    _add_virtio_rng = False
-
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(default_ssh_port=None, **kwargs)
-
-    def get_riscv_bios_args(self) -> typing.List[str]:
-        # Run a simple RTEMS shell application (run in machine mode using the -bios QEMU argument)
-        return ["-bios", str(BuildRtems.get_build_dir(self) / "riscv/rv64xcheri_qemu/testsuites/samples/capture.exe")]
-
-    def process(self):
-        super().process()
-
-
 class LaunchDmQEMU(LaunchCheriBSD):
     target = "run-dm"
     forward_ssh_port = False
@@ -804,59 +792,10 @@ class LaunchDmQEMU(LaunchCheriBSD):
         super().process()
 
 
-class LaunchFreeRTOSQEMU(LaunchQEMUBase):
-    target = "run-freertos"
-    dependencies = ["freertos"]
-    supported_architectures = [CompilationTargets.BAREMETAL_NEWLIB_RISCV64_PURECAP,
-                               CompilationTargets.BAREMETAL_NEWLIB_RISCV64]
-    forward_ssh_port = False
-    qemu_user_networking = False
-    _enable_smbfs_support = False
-    _add_virtio_rng = False
-
-    default_demo = "RISC-V-Generic"
-    default_demo_app = "main_blinky"
-
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(defaultSshPort=None, **kwargs)
-
-        cls.demo = cls.add_config_option(
-            "demo", metavar="DEMO", show_help=True,
-            default=cls.default_demo,
-            help="The FreeRTOS Demo to run.")  # type: str
-
-        cls.demo_app = cls.add_config_option(
-            "prog", metavar="PROG", show_help=True,
-            default=cls.default_demo_app,
-            help="The FreeRTOS program to run.")  # type: str
-
-        cls.demo_bsp = cls.add_config_option(
-            "bsp", metavar="BSP", show_help=True,
-            default=ComputedDefaultValue(function=lambda _, p: p.default_demo_bsp(),
-                                         as_string="target-dependent default"),
-            help="The FreeRTOS BSP to run. This is only valid for the "
-                 "paramterized RISC-V-Generic. The BSP option chooses "
-                 "platform, RISC-V arch and RISC-V abi in the "
-                 "$platform-$arch-$abi format. See RISC-V-Generic/README for more details")
-
-    def default_demo_bsp(self):
-        return "qemu_virt-" + self.target_info.get_riscv_arch_string(self.crosscompile_target, softfloat=True) + "-" + \
-               self.target_info.get_riscv_abi(self.crosscompile_target, softfloat=True)
-
-    def get_riscv_bios_args(self) -> typing.List[str]:
-        # Run a FreeRTOS demo application (run in machine mode using the -bios QEMU argument)
-        return ["-bios", str(BuildFreeRTOS.get_install_dir(self)) + "/FreeRTOS/Demo/" +
-                self.demo + "_" + self.demo_app + ".elf"]
-
-    def process(self):
-        super().process()
-
-
 class LaunchFreeBSD(_RunMultiArchFreeBSDImage):
     target = "run-freebsd"
     hide_options_from_help = True
-    _source_class = BuildFreeBSDImage
+    _disk_image_class = BuildFreeBSDImage
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -867,7 +806,7 @@ class LaunchFreeBSD(_RunMultiArchFreeBSDImage):
 class LaunchFreeBSDWithDefaultOptions(_RunMultiArchFreeBSDImage):
     target = "run-freebsd-with-default-options"
     hide_options_from_help = True
-    _source_class = BuildFreeBSDWithDefaultOptionsDiskImage
+    _disk_image_class = BuildFreeBSDWithDefaultOptionsDiskImage
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -877,7 +816,7 @@ class LaunchFreeBSDWithDefaultOptions(_RunMultiArchFreeBSDImage):
 
 class LaunchMinimalCheriBSD(LaunchCheriBSD):
     target = "run-minimal"
-    _source_class = BuildMinimalCheriBSDDiskImage
+    _disk_image_class = BuildMinimalCheriBSDDiskImage
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -891,14 +830,20 @@ class LaunchMinimalCheriBSD(LaunchCheriBSD):
 class LaunchCheriBsdMfsRoot(LaunchMinimalCheriBSD):
     target = "run-mfs-root"
     _freebsd_class = BuildCheriBsdMfsKernel
-    _source_class = BuildCheriBsdMfsKernel   # no disk image, ignore type checker error
+    _disk_image_class = None
+
+    # XXX: Existing code isn't reqdy to run these but we want to support building them
+    @classproperty
+    def supported_architectures(self):
+        arches = super().supported_architectures
+        return list(set(arches) -
+                    set([CompilationTargets.CHERIBSD_AARCH64] + CompilationTargets.ALL_CHERIBSD_MORELLO_TARGETS))
 
     def __init__(self, config):
-        # noinspection PyTypeChecker
         super().__init__(config, needs_disk_image=False)
         if self.config.use_minimal_benchmark_kernel:
-            kernel_config = self.source_project.default_kernel_config(ConfigPlatform.QEMU, benchmark=True)
-            self.current_kernel = self.source_project.get_kernel_install_path(kernel_config)
+            kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, benchmark=True)
+            self.current_kernel = self.kernel_project.get_kernel_install_path(kernel_config)
             if str(self.remote_kernel_path).endswith("MFS_ROOT"):
                 self.remote_kernel_path += "_BENCHMARK"
         self.rootfs_path = BuildCHERIBSD.get_rootfs_dir(self, config)

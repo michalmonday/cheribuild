@@ -34,8 +34,7 @@ from enum import Enum
 from pathlib import Path
 
 from .chericonfig import CheriConfig
-from .compilation_targets import CrossCompileTarget
-from .loader import ComputedDefaultValue, ConfigLoaderBase
+from .config_loader_base import ComputedDefaultValue, ConfigLoaderBase
 from .target_info import CompilerType
 from ..filesystemutils import FileSystemUtils
 from ..utils import default_make_jobs_count, fatal_error, OSInfo, warning_message
@@ -59,7 +58,7 @@ class JenkinsAction(Enum):
 
     # TODO: TEST = ("--test", "Run tests for the passed targets instead of building them", "--run-tests")
 
-    def __init__(self, option_name, help_message, altname=None, actions=None):
+    def __init__(self, option_name, help_message, altname=None, actions=None) -> None:
         self.option_name = option_name
         self.help_message = help_message
         self.altname = altname
@@ -90,7 +89,7 @@ def _infer_compiler_output_path(config: "JenkinsConfig", _):
 
 
 class JenkinsConfig(CheriConfig):
-    def __init__(self, loader: ConfigLoaderBase, available_targets: list):
+    def __init__(self, loader: ConfigLoaderBase, available_targets: list) -> None:
         super().__init__(loader, action_class=JenkinsAction)
         self.default_action = ""  # error if no action set
 
@@ -209,7 +208,7 @@ class JenkinsConfig(CheriConfig):
             os_suffix = "unknown-os"
         return self.workspace / ("qemu-" + os_suffix) / "bin"
 
-    def load(self):
+    def load(self) -> None:
         super().load()
 
         if not self.workspace or not self.workspace.is_dir():
@@ -246,7 +245,6 @@ class JenkinsConfig(CheriConfig):
         else:
             self.morello_sdk_dir = self.workspace / self.default_morello_sdk_directory_name
 
-        self.preferred_xtarget = None  # type: typing.Optional[CrossCompileTarget]
         if self.cpu != "default":
             warning_message("--cpu parameter passed(", self.cpu, "), this is deprecated!", sep="")
 

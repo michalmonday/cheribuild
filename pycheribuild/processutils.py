@@ -57,8 +57,8 @@ __all__ = ["print_command", "get_compiler_info", "CompilerInfo", "popen", "popen
            "run_and_kill_children_on_exit", "ssh_config_parameters", "ssh_host_accessible"]  # no-combine
 
 
-def __filter_env(env: dict) -> dict:
-    result = dict()
+def __filter_env(env: "dict[str, str]") -> "dict[str, str]":
+    result: "dict[str, str]" = dict()
     for k, v in env.items():
         if k not in os.environ or os.environ[k] != v:
             result[k] = v
@@ -78,7 +78,7 @@ def set_env(*, print_verbose_only=True, config: ConfigBase = None, **environ):
     False
 
     """
-    changed_values = dict()  # type: dict[str, typing.Optional[str]]
+    changed_values: dict[str, typing.Optional[str]] = dict()
     if environ:
         if config is None:
             config = get_global_config()  # TODO: remove
@@ -123,13 +123,13 @@ class TtyState:
             if self._isatty():
                 warning_message("Failed to query TTY flags for", context, "-", e)
 
-    def _isatty(self):
+    def _isatty(self) -> bool:
         try:
             return os.isatty(self.fd.fileno())
         except io.UnsupportedOperation:
             return False
 
-    def _restore_attrs(self):
+    def _restore_attrs(self) -> None:
         try:
             # Run drain first to ensure that we get the most recent state.
             termios.tcdrain(self.fd)
@@ -152,7 +152,7 @@ class TtyState:
             print("Previous state", self.attrs)
             print("New state", new_attrs)
 
-    def _restore_flags(self):
+    def _restore_flags(self) -> None:
         new_flags = fcntl.fcntl(self.fd, fcntl.F_GETFL)
         if new_flags == self.flags:
             return
@@ -165,7 +165,7 @@ class TtyState:
             print("Previous flags", hex(self.flags))
             print("New flags", hex(new_flags))
 
-    def restore(self):
+    def restore(self) -> None:
         if self.attrs is not None:  # Not a TTY
             self._restore_attrs()
         if self.flags is not None:  # Not a real file?
@@ -255,7 +255,7 @@ def get_interpreter(cmdline: "typing.Sequence[str]") -> "typing.Optional[typing.
             return None
 
 
-def _make_called_process_error(retcode, args, *, stdout=None, stderr=None, cwd=None):
+def _make_called_process_error(retcode, args, *, stdout=None, stderr=None, cwd=None) -> subprocess.CalledProcessError:
     err = subprocess.CalledProcessError(retcode, args, output=stdout, stderr=stderr)
     err.cwd = cwd
     return err
@@ -303,7 +303,7 @@ def scoped_open(*args, ignore_open_error, **kwargs):
 
 
 # https://stackoverflow.com/a/15257702/894271
-def _new_tty_foreground_process_group():
+def _new_tty_foreground_process_group() -> None:
     try:
         os.setpgrp()
     except Exception as e:
@@ -321,20 +321,20 @@ def _new_tty_foreground_process_group():
 
 # Python 3.7 has contextlib.nullcontext
 class FakePopen:
-    def kill(self):
+    def kill(self) -> None:
         pass
 
-    def terminate(self):
+    def terminate(self) -> None:
         pass
 
     @staticmethod
-    def poll():
+    def poll() -> int:
         return 0
 
-    def __enter__(self):
+    def __enter__(self) -> "FakePopen":
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args) -> None:
         pass
 
 
@@ -354,7 +354,7 @@ def popen(cmdline, print_verbose_only=False, run_in_pretend_mode=False, *, confi
 def run_command(*args, capture_output=False, capture_error=False, input: "typing.Union[str, bytes]" = None,
                 timeout=None, print_verbose_only=False, run_in_pretend_mode=False, raise_in_pretend_mode=False,
                 no_print=False, replace_env=False, give_tty_control=False, expected_exit_code=0,
-                allow_unexpected_returncode=False, config: ConfigBase = None, **kwargs):
+                allow_unexpected_returncode=False, config: ConfigBase = None, **kwargs) -> "CompletedProcess[bytes]":
     if config is None:
         config = get_global_config()  # TODO: remove
     if len(args) == 1 and isinstance(args[0], (list, tuple)):
@@ -403,11 +403,12 @@ def run_command(*args, capture_output=False, capture_error=False, input: "typing
             kwargs["env"] = dict((k, str(v)) for k, v in env_arg.items())
     if give_tty_control:
         kwargs["preexec_fn"] = _new_tty_foreground_process_group
-    stdout = b""
-    stderr = b""
+    stdout: bytes = b""
+    stderr: bytes = b""
     # Some programs (such as QEMU) can mess up the TTY state if they don't exit cleanly
     with keep_terminal_sane(give_tty_control, command=cmdline):
         with popen_handle_noexec(cmdline, **kwargs) as process:
+            exc = None
             try:
                 stdout, stderr = process.communicate(input, timeout=timeout)
             except KeyboardInterrupt:
@@ -416,37 +417,40 @@ def run_command(*args, capture_output=False, capture_error=False, input: "typing
                 process.kill()
                 stdout, stderr = process.communicate()
                 assert timeout is not None
-                raise subprocess.TimeoutExpired(process.args, timeout, output=stdout, stderr=stderr)
+                exc = subprocess.TimeoutExpired(process.args, timeout, output=stdout, stderr=stderr)
             except BrokenPipeError:
                 # just return the exit code
                 process.kill()
                 retcode = process.wait()
-                raise _make_called_process_error(retcode, process.args, stdout=b"", cwd=kwargs["cwd"])
-            except Exception:
+                exc = _make_called_process_error(retcode, process.args, stdout=b"", cwd=kwargs["cwd"])
+            except Exception as e:
                 process.kill()
                 process.wait()
-                raise
+                exc = e
             retcode = process.poll()
             if retcode != expected_exit_code and not allow_unexpected_returncode:
+                exc = _make_called_process_error(retcode, process.args, stdout=stdout, stderr=stderr, cwd=kwargs["cwd"])
+            if exc is not None:
                 if config.pretend and not raise_in_pretend_mode:
                     cwd = (". Working directory was ", kwargs["cwd"]) if "cwd" in kwargs else ()
                     fatal_error("Command ", "`" + commandline_to_str(process.args) +
                                 "` failed with unexpected exit code ", retcode, *cwd, sep="", pretend=config.pretend)
                 else:
-                    raise _make_called_process_error(retcode, process.args, stdout=stdout, stderr=stderr,
-                                                     cwd=kwargs["cwd"])
+                    raise exc
+            stdout = typing.cast(bytes, stdout)
+            stderr = typing.cast(bytes, stderr)
             return CompletedProcess(process.args, retcode, stdout, stderr)
 
 
-class DoNoQuoteStr:
-    def __init__(self, s):
+class DoNoQuoteStr(str if typing.TYPE_CHECKING else object):
+    def __init__(self, s: str) -> None:
         self.s = s
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.s
 
 
-def _quote(s):
+def _quote(s) -> str:
     return str(s) if isinstance(s, DoNoQuoteStr) else shlex.quote(str(s))
 
 
@@ -455,7 +459,7 @@ def commandline_to_str(args: "typing.Iterable[typing.Union[str,Path]]") -> str:
 
 
 class CompilerInfo(object):
-    def __init__(self, path: Path, compiler: str, version: "typing.Tuple[int]", version_str: str, default_target: str,
+    def __init__(self, path: Path, compiler: str, version: "tuple[int, ...]", version_str: str, default_target: str,
                  *, config: ConfigBase):
         self.path = path
         self.compiler = compiler
@@ -463,10 +467,10 @@ class CompilerInfo(object):
         self.version_str = version_str
         self.default_target = default_target
         self.config = config
-        self._resource_dir = None  # type: typing.Optional[Path]
-        self._supported_warning_flags = dict()  # type: dict[str, bool]
-        self._supported_sanitizer_flags = dict()  # type: dict[tuple[str, tuple[str]], bool]
-        self._include_dirs = dict()  # type: dict[tuple[str], list[Path]]
+        self._resource_dir: "typing.Optional[Path]" = None
+        self._supported_warning_flags: "dict[str, bool]" = {}
+        self._supported_sanitizer_flags: "dict[tuple[str, tuple[str]], bool]" = {}
+        self._include_dirs: "dict[tuple[str], list[Path]]" = {}
         assert compiler in ("unknown compiler", "clang", "apple-clang", "gcc"), "unknown type: " + compiler
 
     def get_resource_dir(self) -> Path:
@@ -492,6 +496,8 @@ class CompilerInfo(object):
     def get_include_dirs(self, basic_flags: "list[str]") -> "list[Path]":
         include_dirs = self._include_dirs.get(tuple(basic_flags), None)
         if include_dirs is None:
+            if not self.path.exists():
+                return [Path("/unknown/include/dir")]  # avoid failing in jenkins
             # pretend to compile an existing source file and capture the -resource-dir output
             output = run_command(self.path, "-E", "-Wp,-v", "-xc", "/dev/null", config=self.config,
                                  stdout=subprocess.DEVNULL, capture_error=True, print_verbose_only=True,
@@ -514,43 +520,35 @@ class CompilerInfo(object):
             self._include_dirs[tuple(basic_flags)] = include_dirs
         return list(include_dirs)
 
-    def _supports_warning_flag(self, flag: str):
-        assert flag.startswith("-W")
+    def _supports_flag(self, flag: str, other_args: "list[str]") -> bool:
         try:
-            result = run_command(self.path, flag, "-fsyntax-only", "-xc", "/dev/null", "-Werror=unknown-warning-option",
-                                 print_verbose_only=True, run_in_pretend_mode=True, capture_error=True,
-                                 allow_unexpected_returncode=True, config=self.config)
-        except (subprocess.CalledProcessError, OSError) as e:
-            warning_message("Failed to check for", flag, "support:", e)
-            return False
-        return result.returncode == 0
-
-    def _supports_sanitizer_flag(self, sanitzer_flag: str, arch_flags: "list[str]"):
-        assert sanitzer_flag.startswith("-fsanitize")
-        try:
-            result = run_command(self.path, *arch_flags, sanitzer_flag, "-c", "-xc", "/dev/null", "-Werror",
-                                 "-o", "/dev/null", print_verbose_only=True, run_in_pretend_mode=True,
+            if not self.path.exists():
+                return False  # avoid failing in jenkins
+            result = run_command(self.path, *other_args, flag, print_verbose_only=True, run_in_pretend_mode=True,
                                  capture_error=True, allow_unexpected_returncode=True, config=self.config)
         except (subprocess.CalledProcessError, OSError) as e:
-            warning_message("Failed to check for", sanitzer_flag, "support:", e)
+            warning_message("Failed to check for", flag, "support:", e)
             return False
         return result.returncode == 0
 
     def supports_sanitizer_flag(self, sanitzer_flag: str, arch_flags: "list[str]"):
         result = self._supported_sanitizer_flags.get((sanitzer_flag, tuple(arch_flags)))
         if result is None:
-            result = self._supports_sanitizer_flag(sanitzer_flag, arch_flags)
+            assert sanitzer_flag.startswith("-fsanitize")
+            result = self._supports_flag(sanitzer_flag,
+                                         arch_flags + ["-c", "-xc", "/dev/null", "-Werror", "-o", "/dev/null"])
             self._supported_sanitizer_flags[(sanitzer_flag, tuple(arch_flags))] = result
         return result
 
-    def supports_warning_flag(self, flag: str):
+    def supports_warning_flag(self, flag: str) -> bool:
         result = self._supported_warning_flags.get(flag)
         if result is None:
-            result = self._supports_warning_flag(flag)
+            assert flag.startswith("-W")
+            result = self._supports_flag(flag, ["-fsyntax-only", "-xc", "/dev/null", "-Werror=unknown-warning-option"])
             self._supported_warning_flags[flag] = result
         return result
 
-    def supports_Og_flag(self):
+    def supports_Og_flag(self) -> bool:
         if self.compiler == "gcc" and self.version > (4, 8, 0):
             return True
         if self.compiler == "clang" and self.version > (4, 0, 0):
@@ -579,7 +577,7 @@ class CompilerInfo(object):
         result.append("--ld-path=" + str(linker))
         return result
 
-    def get_matching_binutil(self, binutil):
+    def get_matching_binutil(self, binutil) -> typing.Optional[Path]:
         assert self.is_clang
         name = self.path.name
         version_suffix = ""
@@ -611,11 +609,11 @@ class CompilerInfo(object):
     def is_apple_clang(self):
         return self.compiler == "apple-clang"
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "{} ({} {})".format(self.path, self.compiler, ".".join(map(str, self.version)))
 
 
-_cached_compiler_infos = dict()  # type: typing.Dict[Path, CompilerInfo]
+_cached_compiler_infos: "dict[Path, CompilerInfo]" = {}
 
 
 def get_compiler_info(compiler: "typing.Union[str, Path]", *, config: ConfigBase) -> CompilerInfo:
@@ -626,7 +624,13 @@ def get_compiler_info(compiler: "typing.Union[str, Path]", *, config: ConfigBase
         assert found_in_path is not None, "Called with non-existent compiler " + str(compiler)
         compiler = Path(found_in_path)
 
+    kind = "unknown compiler"
+    version = (0, 0, 0)
+    version_str = "unknown version"
     if compiler not in _cached_compiler_infos:
+        if not compiler.exists():
+            # Don't try to cache output for a non-existent compiler (e.g. CHERI LLVM before it was built).
+            return CompilerInfo(compiler, kind, version, version_str, default_target="", config=config)
         # Avoid querying the same compiler twice if it is a symlink
         compiler_realpath = compiler.resolve() if compiler.exists() else compiler
         if compiler_realpath in _cached_compiler_infos:
@@ -658,9 +662,6 @@ def get_compiler_info(compiler: "typing.Union[str, Path]", *, config: ConfigBase
         apple_llvm_version = apple_llvm_version_pattern.search(version_cmd.stderr)
         gcc_version = gcc_version_pattern.search(version_cmd.stderr)
         target = target_pattern.search(version_cmd.stderr)
-        kind = "unknown compiler"
-        version = (0, 0, 0)
-        version_str = "unknown version"
         target_string = target.group(1).decode("utf-8") if target else ""
         if gcc_version:
             kind = "gcc"
@@ -701,9 +702,8 @@ def get_version_output(program: Path, command_args: tuple = None, *, config: Con
 
 
 @functools.lru_cache(maxsize=20)
-def get_program_version(program: Path, command_args: tuple = None, component_kind: "typing.Type[Type_T]" = int,
-                        regex=None, program_name: bytes = None, *,
-                        config: ConfigBase) -> "typing.Tuple[Type_T, Type_T, Type_T]":
+def get_program_version(program: Path, command_args: tuple = None, component_kind: "type[Type_T]" = int,
+                        regex=None, program_name: bytes = None, *, config: ConfigBase) -> "tuple[Type_T, ...]":
     if config is None:
         config = get_global_config()  # TODO: remove
     if program_name is None:
@@ -717,8 +717,8 @@ def get_program_version(program: Path, command_args: tuple = None, component_kin
 
 
 # extract the version component from program output such as "git version 2.7.4"
-def extract_version(output: bytes, component_kind: "typing.Type[Type_T]" = int, regex: "typing.Pattern" = None,
-                    program_name: bytes = b"") -> "typing.Tuple[Type_T, Type_T, Type_T]":
+def extract_version(output: bytes, component_kind: "type[Type_T]" = int, regex: "typing.Pattern" = None,
+                    program_name: bytes = b"") -> "tuple[Type_T, ...]":
     if regex is None:
         prefix = re.escape(program_name) + b" " if program_name else b""
         regex = re.compile(prefix + b"version\\s+(\\d+)\\.(\\d+)\\.?(\\d+)?")
@@ -728,7 +728,6 @@ def extract_version(output: bytes, component_kind: "typing.Type[Type_T]" = int, 
     if not match:
         print(output)
         raise ValueError("Expected to match regex " + str(regex))
-    # noinspection PyTypeChecker
     # Python 3.7.0 includes None elements for unmatched optional groups, so we have to omit those.
     return tuple(component_kind(x) for x in match.groups() if x is not None)
 
@@ -813,8 +812,14 @@ def run_and_kill_children_on_exit(fn: "typing.Callable[[], typing.Any]"):
         extra_msg = (". Working directory was ", err.cwd) if hasattr(err, "cwd") else ()
         if err.stderr is not None:
             extra_msg += ("\nStandard error was:\n", err.stderr.decode("utf-8"))
-        fatal_error("Command ", "`" + commandline_to_str(err.cmd) + "` failed with non-zero exit code ",
-                    err.returncode, *extra_msg, fatal_when_pretending=True, sep="", exit_code=err.returncode)
+        # If we are currently debugging, raise the exception to allow e.g. PyCharm's
+        # "break on exception that terminates execution" feature works.
+        debugger_attached = getattr(sys, 'gettrace', lambda: None)() is not None
+        if debugger_attached:
+            raise err
+        else:
+            fatal_error("Command ", "`" + commandline_to_str(err.cmd) + "` failed with non-zero exit code ",
+                        err.returncode, *extra_msg, fatal_when_pretending=True, sep="", exit_code=err.returncode)
     finally:
         if error:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)

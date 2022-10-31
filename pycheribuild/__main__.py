@@ -28,38 +28,40 @@
 # SUCH DAMAGE.
 #
 import fcntl
+import json
 import os
 import shutil
 import subprocess
 import sys
 import traceback
+from collections import OrderedDict
 # noinspection PyUnresolvedReferences
 from pathlib import Path
 
-from .config.defaultconfig import CheribuildAction, DefaultCheriConfig
+from .config.defaultconfig import CheribuildAction, DefaultCheriConfig, DefaultCheribuildConfigLoader
 # First thing we need to do is set up the config loader (before importing anything else!)
 # We can't do from .configloader import ConfigLoader here because that will only update the local copy!
 # https://stackoverflow.com/questions/3536620/how-to-change-a-module-variable-from-another-module
-from .config.loader import JsonAndCommandLineConfigLoader
+from .config.loader import MyJsonEncoder, ConfigOptionBase
 # make sure all projects are loaded so that target_manager gets populated
 # noinspection PyUnresolvedReferences
 from .projects import *  # noqa: F401,F403
 # noinspection PyUnresolvedReferences
 from .projects.cross import *  # noqa: F401,F403
-from .projects.project import SimpleProject
-from .targets import target_manager
+from .projects.simple_project import SimpleProject
+from .targets import target_manager, Target
 from .processutils import (get_program_version, print_command, run_and_kill_children_on_exit, run_command)
 from .utils import (AnsiColour, coloured, fatal_error, have_working_internet_connection, init_global_config,
                     status_update)
-DIRS_TO_CHECK_FOR_UPDATES = [Path(__file__).parent.parent]
+DIRS_TO_CHECK_FOR_UPDATES: "list[Path]" = [Path(__file__).parent.parent]
 
 
-def update_check(config: DefaultCheriConfig):
+def update_check(config: DefaultCheriConfig) -> None:
     for d in DIRS_TO_CHECK_FOR_UPDATES:
         _update_check(config, d)
 
 
-def _update_check(config: DefaultCheriConfig, d: Path):
+def _update_check(config: DefaultCheriConfig, d: Path) -> None:
     if not shutil.which("git"):
         return
     # Avoid update check if we don't have an internet connection
@@ -85,7 +87,7 @@ def _update_check(config: DefaultCheriConfig, d: Path):
             os.execv(sys.argv[0], sys.argv)
 
 
-def ensure_fd_is_blocking(fd):
+def ensure_fd_is_blocking(fd) -> None:
     flag = fcntl.fcntl(fd, fcntl.F_GETFL)
     if flag & os.O_NONBLOCK:
         # Try to unset the flag (this appears to happen on macOS sometimes):
@@ -95,19 +97,31 @@ def ensure_fd_is_blocking(fd):
         fatal_error("fd", fd, "is set to nonblocking and could not unset flag")
 
 
-def check_not_root():
+def check_not_root() -> None:
     if os.geteuid() == 0:
         fatal_error("You are running cheribuild as root. This is dangerous, bad practice and can cause builds to fail."
                     " Please re-run as a non-root user.", pretend=False)
 
 
-def real_main():
+# noinspection PyProtectedMember
+def get_config_option_value(option: ConfigOptionBase, config: DefaultCheriConfig) -> str:
+    if option._owning_class is not None:
+        project_cls: "type[SimpleProject]" = option._owning_class
+        Target.instantiating_targets_should_warn = False
+        t = target_manager.get_target(project_cls.target, None, config, caller="get_config_option")
+        obj = t.get_or_create_project(None, config)
+        return option.__get__(obj, option._owning_class)
+    # otherwise it must be a config option on CheriConfig:
+    return option.__get__(config, type(config))
+
+
+def real_main() -> None:
     # avoid weird errors with macos terminal:
     ensure_fd_is_blocking(sys.stdin.fileno())
     ensure_fd_is_blocking(sys.stdout.fileno())
     ensure_fd_is_blocking(sys.stderr.fileno())
 
-    config_loader = JsonAndCommandLineConfigLoader()
+    config_loader = DefaultCheribuildConfigLoader()
     # Don't suggest deprecated names when tab-completing
     if config_loader.is_completing_arguments:
         all_target_names = list(sorted(target_manager.non_deprecated_target_names(None)))
@@ -125,7 +139,7 @@ def real_main():
     if not cheri_config.allow_running_as_root:
         check_not_root()
     init_global_config(cheri_config)
-    if JsonAndCommandLineConfigLoader.get_config_prefix() == "docker-":
+    if config_loader.get_config_prefix() == "docker-":
         cheri_config.docker = True
 
     if CheribuildAction.LIST_TARGETS in cheri_config.action:
@@ -134,15 +148,21 @@ def real_main():
         print("There are", len(names), "available targets:\n ", "\n  ".join(names))
         sys.exit()
     elif CheribuildAction.DUMP_CONFIGURATION in cheri_config.action:
-        print(cheri_config.get_options_json())
+        json_dict = OrderedDict()
+        for v in cheri_config.loader.options.values():
+            try:
+                json_dict[v.full_option_name] = get_config_option_value(v, cheri_config)
+            except LookupError:
+                if cheri_config.debug_output:
+                    print("Skipping alias config option", v.full_option_name, file=sys.stderr)
+                continue
+        json.dump(json_dict, sys.stdout, sort_keys=True, cls=MyJsonEncoder, indent=4)
         sys.exit()
     elif cheri_config.get_config_option:
         if cheri_config.get_config_option not in config_loader.options:
             fatal_error("Unknown config key", cheri_config.get_config_option)
         option = config_loader.options[cheri_config.get_config_option]
-        # noinspection PyProtectedMember
-        owning_class = option._owning_class if option._owning_class else cheri_config
-        print(option.__get__(cheri_config, owning_class))  # pytype: disable=attribute-error
+        print(get_config_option_value(option, cheri_config))
         sys.exit()
 
     assert any(x in cheri_config.action for x in (CheribuildAction.TEST, CheribuildAction.BUILD,
@@ -261,7 +281,7 @@ def real_main():
             target.run_benchmarks(cheri_config)
 
 
-def main():
+def main() -> None:
     try:
         run_and_kill_children_on_exit(real_main)
     except Exception as e:

@@ -34,8 +34,7 @@ from pathlib import Path
 from .crosscompileproject import (BuildType, CheriConfig, CompilationTargets, CrossCompileAutotoolsProject,
                                   DefaultInstallDir, GitRepository, Linkage, MakeCommandKind)
 from .gmp import BuildGmp
-from ..project import TargetBranchInfo
-from ...config.loader import ComputedDefaultValue
+from ..project import ComputedDefaultValue
 from ...processutils import run_command
 from ...utils import OSInfo, status_update
 
@@ -73,10 +72,18 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
     supported_architectures = (CompilationTargets.ALL_CHERIBSD_NON_CHERI_TARGETS +
                                CompilationTargets.ALL_CHERIBSD_HYBRID_TARGETS +
                                CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS +
-                               CompilationTargets.ALL_SUPPORTED_FREEBSD_TARGETS + [CompilationTargets.NATIVE])
-    default_architecture = CompilationTargets.NATIVE
+                               CompilationTargets.ALL_SUPPORTED_FREEBSD_TARGETS +
+                               [CompilationTargets.NATIVE_NON_PURECAP])
+    default_architecture = CompilationTargets.NATIVE_NON_PURECAP
     prefer_full_lto_over_thin_lto = True
-    dependencies = ["gmp"]
+
+    @classmethod
+    def dependencies(cls, config: CheriConfig) -> "list[str]":
+        deps = super().dependencies(config)
+        # For the native and native-hybrid builds gmp must be installed via ports.
+        if not cls.get_crosscompile_target().is_native():
+            deps.append("gmp")
+        return deps
 
     @classmethod
     def is_toolchain_target(cls):
@@ -91,8 +98,11 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
     def __init__(self, config: CheriConfig):
         self._compile_status_message = None
         super().__init__(config)
+        if self.compiling_for_host() and self.target_info.is_cheribsd():
+            self.add_required_pkg_config("gmp", freebsd="gmp")
+            self.add_required_pkg_config("expat", freebsd="expat")
 
-    def setup(self):
+    def setup(self) -> None:
         super().setup()
         install_root = self.install_dir if self.compiling_for_host() else self.install_prefix
         # See https://github.com/bsdjhb/kdbg/blob/master/gdb/build
@@ -113,6 +123,9 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
             "--disable-libstdcxx",
             "--with-guile=no",
             ])
+
+        if self.target_info.is_freebsd():
+            self.configure_args.append("--with-separate-debug-dir=/usr/lib/debug")
 
         if self.use_lto:
             self.configure_args.append("--enable-lto")
@@ -137,7 +150,8 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
         self.cross_warning_flags.append("-Wno-error=incompatible-pointer-types")
         self.configure_args.append("--enable-targets=all")
         if self.compiling_for_host():
-            self.LDFLAGS.append("-L/usr/local/lib")
+            if self.target_info.is_freebsd():
+                self.LDFLAGS.append(f"-L{self.target_info.localbase}/lib")  # Expat/GMP are in $LOCALBASE
             self.configure_args.append("--with-expat")
         else:
             self.configure_args.extend(["--without-python", "--without-expat", "--without-libunwind-ia64"])
@@ -149,14 +163,14 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
                                               am_cv_CC_dependencies_compiler_type="gcc3",
                                               MAKEINFO="/bin/false"
                                               )
-            # TODO: Make unconditional once CHERI-GDB is updated to 11.1
-            if "gmp" in self.dependencies:
-                self.COMMON_FLAGS.append("-I" + str(BuildGmp.get_install_dir(self) / "include"))
-                self.LDFLAGS.append("-L" + str(BuildGmp.get_install_dir(self) / "lib"))
-                # Autoconf stupidly decides which to use based on file existence
-                # before trying to actually use the thing, so our passing of
-                # -static means the .so fails to link in and thus the build fails.
-                self.configure_args.append("--with-libgmp-type=static")
+            self.configure_args.append("--with-gmp=" + str(BuildGmp.get_install_dir(self)))
+            # GDB > 12 only uses --with-gmp
+            self.configure_args.append("--with-libgmp-prefix=" + str(BuildGmp.get_install_dir(self)))
+            # Autoconf stupidly decides which to use based on file existence
+            # before trying to actually use the thing, so our passing of
+            # -static means the .so fails to link in and thus the build fails.
+            self.configure_args.append("--with-libgmp-type=static")
+
             self.COMMON_FLAGS.append("-static")  # seems like LDFLAGS is not enough
             # XXX: libtool wants to strip -static from some linker invocations,
             #      and because sbrk's availability is determined based on
@@ -173,13 +187,13 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
             self.configure_environment.update(CONFIGURED_M4="m4", CONFIGURED_BISON="byacc", TMPDIR="/tmp", LIBS="")
             # Look in /usr/lib not /usr/local/lib
             self.configure_args.append("--with-separate-debug-dir=/usr/lib/debug")
+            self.configure_environment["CC_FOR_BUILD"] = str(self.host_CC)
+            self.configure_environment["CXX_FOR_BUILD"] = str(self.host_CXX)
+            self.configure_environment["CFLAGS_FOR_BUILD"] = "-g -fcommon"
+            self.configure_environment["CXXFLAGS_FOR_BUILD"] = "-g -fcommon"
+
         if self.make_args.command == "gmake":
             self.configure_environment["MAKE"] = "gmake"
-
-        self.configure_environment["CC_FOR_BUILD"] = str(self.host_CC)
-        self.configure_environment["CXX_FOR_BUILD"] = str(self.host_CXX)
-        self.configure_environment["CFLAGS_FOR_BUILD"] = "-g -fcommon"
-        self.configure_environment["CXXFLAGS_FOR_BUILD"] = "-g -fcommon"
 
         if not self.compiling_for_host():
             self.add_configure_env_arg("AR", self.target_info.ar)
@@ -238,22 +252,17 @@ class BuildUpstreamGDB(BuildGDBBase):
 class BuildGDB(BuildGDBBase):
     path_in_rootfs = "/usr/local"  # Always install gdb as /usr/local/bin/gdb
     native_install_dir = DefaultInstallDir.CHERI_SDK
-    _morello_target_branch_info = TargetBranchInfo(branch="morello-8.3", directory_name="morello-gdb")
-    default_branch = "mips_cheri-8.3"
+    default_branch = "cheri-12"
     repository = GitRepository(
         "https://github.com/CTSRD-CHERI/gdb.git",
         # Branch name is changed for every major GDB release:
         default_branch=default_branch,
         old_branches={"mips_cheri_7.12": default_branch,
                       "mips_cheri-8.0.1": default_branch,
-                      "mips_cheri-8.2": default_branch},
-        per_target_branches={
-            CompilationTargets.CHERIBSD_AARCH64: _morello_target_branch_info,
-            CompilationTargets.CHERIBSD_MORELLO_HYBRID: _morello_target_branch_info,
-            CompilationTargets.CHERIBSD_MORELLO_HYBRID_FOR_PURECAP_ROOTFS: _morello_target_branch_info,
-            },
+                      "mips_cheri-8.2": default_branch,
+                      "mips_cheri-8.3": default_branch,
+                      "morello-8.3": default_branch},
         old_urls=[b'https://github.com/bsdjhb/gdb.git'])
-    dependencies = []  # TODO: Remove once updated to 11.1
 
 
 class BuildKGDB(BuildGDB):

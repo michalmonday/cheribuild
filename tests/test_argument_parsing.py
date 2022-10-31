@@ -24,7 +24,7 @@ from pycheribuild.projects.cross.qt5 import BuildQtBase
 # noinspection PyProtectedMember
 from pycheribuild.projects.disk_image import BuildCheriBSDDiskImage, BuildDiskImageBase
 # Override the default config loader:
-from pycheribuild.projects.project import SimpleProject
+from pycheribuild.projects.simple_project import SimpleProject
 from pycheribuild.projects.run_qemu import LaunchCheriBSD
 from pycheribuild.targets import MultiArchTargetAlias, Target, target_manager
 
@@ -96,7 +96,8 @@ def test_skip_update():
 
 @pytest.mark.parametrize("args,expected", [
     pytest.param(["--include-dependencies", "run-riscv64-purecap"],
-                 ["qemu", "llvm-native", "cheribsd-riscv64-purecap", "gdb-riscv64-hybrid-for-purecap-rootfs",
+                 ["qemu", "llvm-native", "cheribsd-riscv64-purecap",
+                  "gmp-riscv64-hybrid-for-purecap-rootfs", "gdb-riscv64-hybrid-for-purecap-rootfs",
                   "bbl-baremetal-riscv64-purecap", "disk-image-riscv64-purecap", "run-riscv64-purecap"],
                  id="run-include-deps"),
     pytest.param(["--include-dependencies", "--skip-sdk", "run-riscv64-purecap"],
@@ -747,7 +748,7 @@ def test_kernel_configs(target, config_options: "list[str]", expected_name, extr
 def test_mfsroot_kernel_configs(target: str, config_options: "list[str]", expected_kernels: "list[str]"):
     config = _parse_arguments(config_options)
     project = _get_target_instance(target, config, BuildCheriBsdMfsKernel)
-    assert project.get_kernel_configs() == expected_kernels
+    assert project.get_kernel_configs(None) == expected_kernels
 
 
 # noinspection PyTypeChecker

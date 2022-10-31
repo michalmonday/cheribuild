@@ -32,8 +32,9 @@ import os
 import subprocess
 
 from .cross.cheribsd import BuildCHERIBSD
-from .project import (CheriConfig, CMakeProject, CPUArchitecture, DefaultInstallDir, GitRepository, SimpleProject,
-                      TargetAliasWithDependencies)
+from .cmake_project import CMakeProject
+from .project import CheriConfig, CPUArchitecture, DefaultInstallDir, GitRepository
+from .simple_project import SimpleProject, TargetAliasWithDependencies
 from ..targets import target_manager
 from ..utils import classproperty, include_local_file
 
@@ -43,8 +44,8 @@ class BuildCheriBSDSdk(TargetAliasWithDependencies):
     is_sdk_target = True
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
-        if cls.get_crosscompile_target(config).is_hybrid_or_purecap_cheri([CPUArchitecture.AARCH64]):
+    def dependencies(cls, _: CheriConfig) -> "list[str]":
+        if cls.get_crosscompile_target().is_hybrid_or_purecap_cheri([CPUArchitecture.AARCH64]):
             deps = ["freestanding-morello-sdk"]
         else:
             deps = ["freestanding-cheri-sdk"]

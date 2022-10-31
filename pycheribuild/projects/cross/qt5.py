@@ -37,7 +37,8 @@ from .crosscompileproject import (BuildType, CheriConfig, CompilationTargets, Cr
                                   DefaultInstallDir, GitRepository, MakeCommandKind)
 from .wayland import BuildWayland
 from .x11 import BuildLibXCB
-from ..project import SimpleProject, default_source_dir_in_subdir
+from ..project import default_source_dir_in_subdir
+from ..simple_project import SimpleProject
 from ...processutils import set_env
 from ...utils import InstallInstructions
 
@@ -85,10 +86,12 @@ class BuildSharedMimeInfo(CrossCompileMesonProject):
             result = native_instance.install_dir / "bin/update-mime-database"
             if not result.exists():
                 native_instance.dependency_error(
-                    "Cannot find native update-mime-database", cheribuild_target=cls.target,
+                    "Cannot find native update-mime-database", cheribuild_target=native_instance.target,
                     cheribuild_xtarget=CompilationTargets.NATIVE)
             return result
         else:
+            # We are building on CheriBSD (purecap)
+            assert native_instance.compiling_for_cheri()
             result = shutil.which("update-mime-database")
             if not result:
                 native_instance.dependency_error(
@@ -113,8 +116,9 @@ class BuildSharedMimeInfo(CrossCompileMesonProject):
             "update-mimedb": True,
             "build-tools": self._can_build_tools
         })
-        # Ensure that we have update-mime-database available as it will be used in a post-install action.
-        self.get_update_mime_database_path(self)
+        if not self._can_build_tools:
+            # Ensure that we have update-mime-database available as it will be used in a post-install action.
+            self.get_update_mime_database_path(self)
 
     def configure(self, **kwargs):
         if not self.compiling_for_host():
@@ -152,7 +156,7 @@ class BuildQtWithConfigureScript(CrossCompileProject):
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "list[str]":
         deps = super().dependencies(config)
-        rootfs_target = cls.get_crosscompile_target(config).get_rootfs_target()
+        rootfs_target = cls.get_crosscompile_target().get_rootfs_target()
         deps.append(BuildSharedMimeInfo.get_class_for_target(rootfs_target).target)
         deps.append("sqlite")  # TODO: minimal should probably not include QtSql
         if cls.minimal:
@@ -163,12 +167,12 @@ class BuildQtWithConfigureScript(CrossCompileProject):
                          "libsm", "libxext", "libxtst", "libxcb-render-util", "libxcb-wm", "libxcb-keysyms"])
         # Always use our patched image/sql libraries instead of the host ones:
         deps.extend(["libpng", "libjpeg-turbo"])
-        if not cls.get_crosscompile_target(config).is_native():
+        if not cls.get_crosscompile_target().is_native():
             # We can only depend on fonts when installing to a rootfs, as those need to be installed to a directory
             # that is only writable by root.
             deps.extend([InstallDejaVuFonts.get_class_for_target(rootfs_target).target])
         # For non-macOS we need additional libraries for GUI and openGL parts.
-        if not cls.get_crosscompile_target(config).target_info_cls.is_macos():
+        if not cls.get_crosscompile_target().target_info_cls.is_macos():
             deps.extend(["dbus", "fontconfig", "libinput"])
             if cls.use_opengl:
                 deps.extend(["libglvnd", "libdrm"])
@@ -604,6 +608,13 @@ class BuildQtModuleWithQMake(CrossCompileProject):
     def __init__(self, config):
         super().__init__(config)
         self.early_qmake_args = []
+
+    def setup(self):
+        super().setup()
+        # Avoid starting GUI windows with xcb/wayland while running tests. Without this many tests fail with:
+        # qt.qpa.xcb: could not connect to display
+        # qt.qpa.plugin: Could not load the Qt platform plugin "xcb" in "" even though it was found.
+        self.make_args.set_env(QT_QPA_PLATFORM="offscreen")
 
     def configure(self, **kwargs):
         # Run the QtBase QMake to generate a makefile
