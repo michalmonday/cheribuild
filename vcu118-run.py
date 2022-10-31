@@ -147,6 +147,8 @@ def load_bitfile(bitfile: Path, ltxfile: Path, fu: FileSystemUtils):
         fatal_error("Missing ltx file:", ltxfile)
     with tempfile.NamedTemporaryFile() as t:
         t.write(VIVADO_SCRIPT)
+        with open('vivado_script.txt', 'wb') as f:
+            f.write(VIVADO_SCRIPT)
         t.flush()
         args = ["vivado", "-nojournal", "-notrace", "-nolog",
                 "-source", t.name, "-mode", "batch", "-tclargs",
@@ -256,7 +258,10 @@ def reset_soc(conn: FpgaConnection):
 
 def start_openocd(openocd_cmd: Path, num_cores: int) -> typing.Tuple[pexpect.spawn, int]:
     with tempfile.NamedTemporaryFile() as t:
-        t.write(generate_openocd_script(num_cores))
+        openocd_script = generate_openocd_script(num_cores)
+        t.write(openocd_script)
+        with open('openocd_script.cfg', 'wb') as f:
+            f.write(openocd_script)
         t.flush()
         cmdline = [str(openocd_cmd), "-f", t.name]
         print_command(cmdline, config=get_global_config())

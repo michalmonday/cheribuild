@@ -1,0 +1,11 @@
+target extended-remote :3333
+set confirm off
+set pagination off
+set style enabled off
+monitor reset init
+si 5
+set disassemble-next-line on
+symbol-file /home/michal/ecats-phase3-evaluation/kernel-riscv64-purecap.CHERI-GFE-NODEBUG
+load /home/michal/ecats-phase3-evaluation/kernel-riscv64-purecap.CHERI-GFE-NODEBUG
+load /home/michal/cheri/output/sdk/bbl-gfe/riscv64-purecap/bbl
+
