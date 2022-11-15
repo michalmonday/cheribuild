@@ -1,0 +1,2 @@
+./cheribuild.py bbl-gfe-baremetal-riscv64-purecap
+./cheribuild.py cheribsd-mfs-root-kernel-riscv64-purecap --cheribsd-mfs-root-kernel/build-fpga-kernels --cheribsd-mfs-root-kernel/build-bench-kernels
