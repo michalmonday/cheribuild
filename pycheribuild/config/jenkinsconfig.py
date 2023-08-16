@@ -29,15 +29,13 @@
 #
 
 import os
-import typing
-from enum import Enum
 from pathlib import Path
 
-from .chericonfig import CheriConfig
+from .chericonfig import CheribuildActionEnum, CheriConfig
 from .config_loader_base import ComputedDefaultValue, ConfigLoaderBase
 from .target_info import CompilerType
 from ..filesystemutils import FileSystemUtils
-from ..utils import default_make_jobs_count, fatal_error, OSInfo, warning_message
+from ..utils import OSInfo, default_make_jobs_count, fatal_error, warning_message
 
 
 def default_install_prefix(conf: "JenkinsConfig", _):
@@ -50,7 +48,7 @@ def default_jenkins_make_jobs_count(conf: "JenkinsConfig", _):
     return default_make_jobs_count()
 
 
-class JenkinsAction(Enum):
+class JenkinsAction(CheribuildActionEnum):
     BUILD = ("--build", "Run (usually build+install) chosen targets (default)")
     CREATE_TARBALL = ("--create-tarball", "Create an archive of the installed files", "--tarball")
     TEST = ("--test", "Run tests")
@@ -85,45 +83,43 @@ def _infer_compiler_output_path(config: "JenkinsConfig", _):
     elif config.compiler_type == CompilerType.UPSTREAM_LLVM:
         return config.workspace / "upstream-llvm-sdk"
     else:
-        raise ValueError("Unsupported compiler type: {}".format(config.compiler_type))
+        raise ValueError(f"Unsupported compiler type: {config.compiler_type}")
 
 
 class JenkinsConfig(CheriConfig):
     def __init__(self, loader: ConfigLoaderBase, available_targets: list) -> None:
         super().__init__(loader, action_class=JenkinsAction)
-        self.default_action = ""  # error if no action set
-
         self.cpu = loader.add_commandline_only_option(
             "cpu", default=os.getenv("CPU", "default"),
-            help="Only used for backwards compatibility with old jenkins jobs")  # type: str
+            help="Only used for backwards compatibility with old jenkins jobs")
         self.workspace = loader.add_commandline_only_option(
             "workspace", default=os.getenv("WORKSPACE"), type=Path,
-            help="The root directory for building (defaults to $WORKSPACE)")  # type: Path
+            help="The root directory for building (defaults to $WORKSPACE)")
         self.compiler_archive_name = loader.add_commandline_only_option(
             "compiler-archive", type=str, default="cheri-clang-llvm.tar.xz",
-            help="The name of the archive containing the compiler")  # type: str
+            help="The name of the archive containing the compiler")
         self.compiler_archive_output_path = loader.add_commandline_only_option(
             "compiler-archive-output-path", type=Path, default=_infer_compiler_output_path,
-            help="The path where to extract the compiler")  # type: Path
+            help="The path where to extract the compiler")
         self.compiler_type = loader.add_commandline_only_option(
             "compiler-type", type=CompilerType, default=CompilerType.CHERI_LLVM,
             enum_choices=[CompilerType.CHERI_LLVM, CompilerType.MORELLO_LLVM, CompilerType.UPSTREAM_LLVM],
             help="The type of the compiler to extract (used to infer the output "
-                 " path)")  # type: typing.Optional[CompilerType]
+                 " path)")
         self.sysroot_archive_name = loader.add_commandline_only_option(
             "sysroot-archive", type=str, default="cheribsd-sysroot.tar.xz",
-            help="The name of the archive containing the sysroot")  # type: str
+            help="The name of the archive containing the sysroot")
         self.sysroot_archive_output_path = loader.add_commandline_only_option(
             "sysroot-archive-output-path", type=Path,
             default=ComputedDefaultValue(lambda c, _: c.compiler_archive_output_path / "sysroot",
                                          as_string="<compiler_path>/sysroot"),
-            help="The path where to extract the sysroot (default=")  # type: typing.Optional[Path]
+            help="The path where to extract the sysroot (default=")
         self.keep_install_dir = loader.add_commandline_only_bool_option(
-            "keep-install-dir", help="Don't delete the install dir prior to build")  # type: bool
+            "keep-install-dir", help="Don't delete the install dir prior to build")
         self.keep_sdk_dir = loader.add_commandline_only_bool_option(
-            "keep-sdk-dir", help="Don't delete existing SDK dir even if there is a newer archive")  # type: bool
+            "keep-sdk-dir", help="Don't delete existing SDK dir even if there is a newer archive")
         self.force_update = loader.add_commandline_only_bool_option(
-            "force-update", help="Do the updating (not recommended in jenkins!)")  # type: bool
+            "force-update", help="Do the updating (not recommended in jenkins!)")
         self.copy_compilation_db_to_source_dir = False
         self.make_without_nice = False
 
@@ -136,7 +132,7 @@ class JenkinsConfig(CheriConfig):
                                                                           "short-running jobs!)")
         self.installation_prefix = loader.add_commandline_only_option(
             "install-prefix", type=absolute_path_only, default=default_install_prefix,
-            help="The install prefix for cross compiled projects (the path in the install image)")  # type: Path
+            help="The install prefix for cross compiled projects (the path in the install image)")
         self.use_system_compiler_for_native = loader.add_commandline_only_bool_option(
             "use-system-compiler-for-native", "-without-sdk",
             help="Don't use the CHERI SDK -> only /usr (for native builds)")
@@ -144,10 +140,10 @@ class JenkinsConfig(CheriConfig):
             "strip-elf-files", help="Strip ELF files before creating the tarball", default=True, negatable=True)
         self._cheri_sdk_dir_override = loader.add_commandline_only_option(
             "cheri-sdk-path", default=None, type=Path,
-            help="Override the path to the CHERI SDK (default is $WORKSPACE/cherisdk)")  # type: Path
+            help="Override the path to the CHERI SDK (default is $WORKSPACE/cherisdk)")
         self._morello_sdk_dir_override = loader.add_commandline_only_option(
             "morello-sdk-path", default=None, type=Path,
-            help="Override the path to the Morello SDK (default is $WORKSPACE/morello-sdk)")  # type: Path
+            help="Override the path to the Morello SDK (default is $WORKSPACE/morello-sdk)")
         self.extract_compiler_only = loader.add_commandline_only_bool_option(
             "extract-compiler-only", help="Don't attempt to extract a sysroot")
         self.tarball_name = loader.add_commandline_only_option(
@@ -165,7 +161,7 @@ class JenkinsConfig(CheriConfig):
         # self.strip_install_prefix_from_archive = loader.add_commandline_only_bool_option(
         # "strip-install-prefix-from-archive",
         #    help="Only put the files inside the install prefix into the tarball (stripping the leading
-        #    directories)")  # type: bool
+        #    directories)")
         self.skip_update = True
         self.skip_clone = True
         self.confirm_clone = False
@@ -221,7 +217,7 @@ class JenkinsConfig(CheriConfig):
                 print("Not cleaning non-default output path", self.output_root)
             self.keep_install_dir = True
         if os.path.relpath(str(self.output_root), str(self.workspace)).startswith(".."):
-            fatal_error("Output path", self.output_root, "must be inside workspace", self.workspace)
+            fatal_error("Output path", self.output_root, "must be inside workspace", self.workspace, pretend=False)
         if os.path.relpath(str(self.sysroot_output_root), str(self.workspace)).startswith(".."):
             fatal_error("Sysroot output path", self.sysroot_output_root, "must be inside workspace", self.workspace,
                         pretend=False, fatal_when_pretending=True)
@@ -258,13 +254,14 @@ class JenkinsConfig(CheriConfig):
             self.clang_plusplus_path = Path(os.getenv("HOST_CXX", self.clang_plusplus_path))
             self.clang_cpp_path = Path(os.getenv("HOST_CPP", self.clang_cpp_path))
             if not self.clang_path.exists():
-                fatal_error("C compiler", self.clang_path, "does not exit. Pass --clang-path or set $HOST_CC")
+                fatal_error("C compiler", self.clang_path,
+                            "does not exit. Pass --clang-path or set $HOST_CC", pretend=self.pretend)
             if not self.clang_plusplus_path.exists():
                 fatal_error("C++ compiler", self.clang_plusplus_path,
-                            "does not exit. Pass --clang++-path or set $HOST_CXX")
+                            "does not exit. Pass --clang++-path or set $HOST_CXX", pretend=self.pretend)
             if not self.clang_cpp_path.exists():
                 fatal_error("C pre-processor", self.clang_cpp_path,
-                            "does not exit. Pass --clang-cpp-path or set $HOST_CPP")
+                            "does not exit. Pass --clang-cpp-path or set $HOST_CPP", pretend=self.pretend)
         else:
             # always use the CHERI clang built by jenkins (if available)
             # Prefix $WORKSPACE/native-sdk, but fall back to CHERI/Morello LLVM if that does not exist

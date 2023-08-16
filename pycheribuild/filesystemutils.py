@@ -34,19 +34,20 @@ import subprocess
 import threading
 import typing
 from pathlib import Path
+from typing import Callable, Optional
 
 from .processutils import print_command, run_command
-from .utils import AnsiColour, ConfigBase, fatal_error, status_update, ThreadJoiner, warning_message
+from .utils import AnsiColour, ConfigBase, ThreadJoiner, fatal_error, status_update, warning_message
 
 
-class FileSystemUtils(object):
+class FileSystemUtils:
     def __init__(self, config: ConfigBase) -> None:
         self.config = config
 
     def makedirs(self, path: Path) -> None:
         print_command("mkdir", "-p", path, print_verbose_only=True)
         if not self.config.pretend and not path.is_dir():
-            os.makedirs(str(path), exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True)
 
     def _delete_directories(self, *dirs) -> None:
         # http://stackoverflow.com/questions/5470939/why-is-shutil-rmtree-so-slow
@@ -83,7 +84,8 @@ class FileSystemUtils(object):
             except Exception as e:
                 warning_message("Could not remove directory", self.path, e)
 
-    def async_clean_directory(self, path: Path, *, keep_root=False, keep_dirs: list = None) -> ThreadJoiner:
+    def async_clean_directory(self, path: Path, *, keep_root=False,
+                              keep_dirs: "Optional[list[str]]" = None) -> ThreadJoiner:
         """
         Delete a directory in the background (e.g. deleting the cheribsd build directory delays the build a lot)
         ::
@@ -125,7 +127,7 @@ class FileSystemUtils(object):
                     all_entries = all_entries_new
                 all_entries = list(map(str, all_entries))
                 if all_entries:
-                    run_command(["mv"] + all_entries + [str(tempdir)], print_verbose_only=True)
+                    run_command(["mv", *all_entries, str(tempdir)], print_verbose_only=True)
             else:
                 # rename the directory, create a new dir and then delete it in a background thread
                 run_command("mv", path, tempdir)
@@ -210,7 +212,7 @@ class FileSystemUtils(object):
         if self.config.pretend:
             return
         if not overwrite and file.exists():
-            fatal_error("File", file, "already exists!")
+            fatal_error("File", file, "already exists!", pretend=self.config.pretend)
         self.makedirs(file.parent)
         with file.open("w", encoding="utf-8") as f:
             f.write(contents)
@@ -222,7 +224,7 @@ class FileSystemUtils(object):
     # whether to create a new file called src.basename() inside dest, whether
     # to use dest.parent or dest, etc.
     @staticmethod
-    def create_symlink(src: Path, dest: Path, *, relative=True, cwd: Path = None, print_verbose_only=True):
+    def create_symlink(src: Path, dest: Path, *, relative=True, cwd: "Optional[Path]" = None, print_verbose_only=True):
         assert dest.is_absolute() or cwd is not None
         if not cwd:
             cwd = dest.parent
@@ -236,7 +238,7 @@ class FileSystemUtils(object):
             run_command("ln", "-fsn", src, dest, cwd=cwd, print_verbose_only=print_verbose_only)
 
     @staticmethod
-    def create_symlinks(srcs: typing.Iterable[Path], destdir: Path, *, relative=True, cwd: Path = None,
+    def create_symlinks(srcs: typing.Iterable[Path], destdir: Path, *, relative=True, cwd: "Optional[Path]" = None,
                         print_verbose_only=True):
         assert destdir.is_absolute() or cwd is not None
         if not cwd:
@@ -252,11 +254,11 @@ class FileSystemUtils(object):
 
     def move_file(self, src: Path, dest: Path, force=False, create_dirs=True) -> None:
         if not src.exists():
-            fatal_error(src, "doesn't exist")
+            fatal_error(src, "doesn't exist", pretend=self.config.pretend)
         cmd = ["mv", "-f"] if force else ["mv"]
         if create_dirs and not dest.parent.exists():
             self.makedirs(dest.parent)
-        run_command(cmd + [str(src), str(dest)])
+        run_command([*cmd, str(src), str(dest)])
 
     def install_file(self, src: Path, dest: Path, *, force=False, create_dirs=True, print_verbose_only=True,
                      mode=None) -> None:
@@ -272,7 +274,7 @@ class FileSystemUtils(object):
         if (dest.is_symlink() or dest.exists()) and force:
             dest.unlink()
         if not src.exists():
-            fatal_error("Required file", src, "does not exist")
+            fatal_error("Required file", src, "does not exist", pretend=self.config.pretend)
         if create_dirs and not dest.parent.exists():
             self.makedirs(dest.parent)
         if dest.is_symlink():
@@ -283,13 +285,13 @@ class FileSystemUtils(object):
             print_command("chmod", oct(mode), dest, print_verbose_only=print_verbose_only)
             dest.chmod(mode)
 
-    def rewrite_file(self, file: Path, rewrite: typing.Callable[[typing.Iterable[str]], typing.Iterable[str]]):
+    def rewrite_file(self, file: Path, rewrite: "Callable[[typing.Iterable[str]], typing.Iterable[str]]"):
         if self.config.pretend:
             return
         if not file.is_absolute():
-            fatal_error("Input path", file, "is not an absolute path")
+            fatal_error("Input path", file, "is not an absolute path", pretend=self.config.pretend)
         if not file.exists():
-            fatal_error("Required file", file, "does not exist")
+            fatal_error("Required file", file, "does not exist", pretend=self.config.pretend)
         with file.open("r+", encoding="utf-8") as f:
             lines = list(rewrite(f.read().splitlines()))
             f.seek(0)
@@ -298,7 +300,7 @@ class FileSystemUtils(object):
 
     def add_unique_line_to_file(self, file: Path, line: str) -> None:
         status_update("Adding '", line, "' to ", file, sep="")
-        self.rewrite_file(file, lambda lines: lines if line in lines else (lines + [line]))
+        self.rewrite_file(file, lambda lines: lines if line in lines else ([*lines, line]))
 
     def replace_in_file(self, file: Path, replacements: "dict[str, str]"):
         def do_replace(old_lines: "typing.Iterable[str]"):
@@ -313,8 +315,8 @@ class FileSystemUtils(object):
     def triple_prefixes_for_binaries(self) -> typing.Iterable[str]:
         raise ValueError("Must override triple_prefixes_for_binaries to use create_triple_prefixed_symlinks!")
 
-    def create_triple_prefixed_symlinks(self, tool_path: Path, tool_name: str = None,
-                                        create_unprefixed_link: bool = False, cwd: str = None) -> None:
+    def create_triple_prefixed_symlinks(self, tool_path: Path, tool_name: "Optional[str]" = None,
+                                        create_unprefixed_link: bool = False, cwd: "Optional[str]" = None) -> None:
         """
         Create mips4-unknown-freebsd, cheri-unknown-freebsd and mips64-unknown-freebsd prefixed symlinks
         for build tools like clang, ld, etc.
@@ -328,7 +330,8 @@ class FileSystemUtils(object):
         if not tool_name:
             tool_name = tool_path.name
         if not tool_path.is_file():
-            fatal_error("Attempting to create symlink to non-existent build tool_path:", tool_path)
+            fatal_error("Attempting to create symlink to non-existent build tool_path:", tool_path,
+                        pretend=self.config.pretend)
 
         # a prefixed tool_path was installed -> create link such as mips4-unknown-freebsd-ld -> ld
         if create_unprefixed_link:
@@ -336,7 +339,7 @@ class FileSystemUtils(object):
             run_command("ln", "-fsn", tool_path.name, tool_name, cwd=cwd, print_verbose_only=True)
 
         for target in self.triple_prefixes_for_binaries:
-            link = tool_path.parent / (target + tool_name)  # type: Path
+            link = tool_path.parent / (target + tool_name)
             if link == tool_path:  # happens for binutils, where prefixed tools are installed
                 # if self.config.verbose:
                 #    print(coloured(AnsiColour.yellow, "Not overwriting", link, "because it is the target"))

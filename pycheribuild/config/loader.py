@@ -34,19 +34,20 @@ import os
 import shutil
 import sys
 import typing
-from typing import Optional, Union, Any, Callable
+from typing import Any, Callable, Optional, Union
 
 try:
     import argcomplete
 except ImportError:
     argcomplete: Optional[Any] = None
 
+from enum import Enum
+from pathlib import Path
+
 from .computed_default_value import ComputedDefaultValue
 from .config_loader_base import ConfigLoaderBase, ConfigOptionBase, DefaultValueOnlyConfigOption, _LoadedConfigValue
-from ..utils import fatal_error, status_update, warning_message, error_message, ConfigBase
 from ..colour import AnsiColour, coloured
-from pathlib import Path
-from enum import Enum
+from ..utils import ConfigBase, error_message, fatal_error, status_update, warning_message
 
 T = typing.TypeVar('T')
 EnumTy = typing.TypeVar('EnumTy', bound=Enum)
@@ -73,13 +74,14 @@ class _EnumArgparseType(typing.Generic[EnumTy]):
 
     def __call__(self, astring: "Union[str, list[str], EnumTy]") -> "Union[EnumTy, list[EnumTy]]":
         if isinstance(astring, list):
-            return [self.__call__(a) for a in astring]
+            return typing.cast(typing.List[EnumTy], [self.__call__(a) for a in astring])
         if isinstance(astring, self.enums):
             return typing.cast(EnumTy, astring)  # Allow passing an enum instance
         name = self.enums.__name__
         try:
             # convert the passed value to the enum name
-            enum_value_name: str = astring.upper()
+            assert isinstance(astring, str)
+            enum_value_name = str(astring).upper()
             enum_value_name = enum_value_name.replace("-", "_")
             for e in self.enums:
                 if e.value == astring:
@@ -87,7 +89,7 @@ class _EnumArgparseType(typing.Generic[EnumTy]):
             v = self.enums[enum_value_name]
         except KeyError:
             msg = ', '.join([t.name.lower() for t in self.enums])
-            msg = '%s: use one of {%s}' % (name, msg)
+            msg = f'{name}: use one of {{{msg}}}'
             raise argparse.ArgumentTypeError(msg)
         #       else:
         #           self.action.choices = None  # hugly hack to prevent post validation from choices
@@ -95,7 +97,7 @@ class _EnumArgparseType(typing.Generic[EnumTy]):
 
     def __repr__(self) -> str:
         astr = ', '.join([t.name.lower() for t in self.enums])
-        return '%s(%s)' % (self.enums.__name__, astr)
+        return f'{self.enums.__name__}({astr})'
 
 
 # custom encoder to handle pathlib.Path and _LoadedConfigValue objects
@@ -129,7 +131,8 @@ def get_argcomplete_prefix() -> str:
         # os.environ["COMP_LINE"] = "cheribuild.py " # return all targets
         if "COMP_LINE" not in os.environ:
             # return all options starting with --sq
-            os.environ["COMP_LINE"] = "cheribuild.py foo --enable-hybrid-for-purecap-rootfs-targets --sq"
+            prefix = os.environ.get("_ARGCOMPLETE_BENCHMARK_PREFIX", "--sq")
+            os.environ["COMP_LINE"] = f"cheribuild.py foo --enable-hybrid-for-purecap-rootfs-targets {prefix}"
         os.environ["COMP_POINT"] = str(len(os.environ["COMP_LINE"]))
     assert argcomplete is not None
     comp_line = os.environ["COMP_LINE"]
@@ -143,7 +146,7 @@ def get_argcomplete_prefix() -> str:
 class BooleanNegatableAction(argparse.Action):
     # noinspection PyShadowingBuiltins
     def __init__(self, option_strings: "list[str]", dest, default=None, type=None, choices=None, required=False,
-                 help=None, metavar=None, alias_names=None):
+                 help=None, metavar=None):
         # Add the negated option, placing the "no" after the / instead of the start -> --cheribsd/no-build-tests
         def collect_option_strings(original_strings):
             for opt in original_strings:
@@ -161,8 +164,6 @@ class BooleanNegatableAction(argparse.Action):
         collect_option_strings(option_strings)
         # Don't show the alias options in --help output
         self.displayed_option_count = len(all_option_strings)
-        if alias_names is not None:
-            collect_option_strings(alias_names)
         super().__init__(option_strings=all_option_strings, dest=dest, nargs=0,
                          default=default, type=type, choices=choices, required=required, help=help, metavar=metavar)
 
@@ -178,12 +179,10 @@ class BooleanNegatableAction(argparse.Action):
 class StoreActionWithPossibleAliases(argparse.Action):
     # noinspection PyShadowingBuiltins
     def __init__(self, option_strings: "list[str]", dest, nargs=None, default=None, type=None, choices=None,
-                 required=False, help=None, metavar=None, alias_names=None):
+                 required=False, help=None, metavar=None):
         if nargs == 1:
             raise ValueError("nargs for store actions must be 1")
         self.displayed_option_count = len(option_strings)
-        if alias_names is not None:
-            option_strings = option_strings + alias_names
         super().__init__(option_strings=option_strings, dest=dest, nargs=nargs, default=default, type=type,
                          choices=choices, required=required, help=help, metavar=metavar)
 
@@ -201,8 +200,8 @@ class CommandLineConfigOption(ConfigOptionBase[T]):
     def __init__(self, name: str, shortname: "Optional[str]", default,
                  value_type: "Union[type[T], Callable[[Any], T]]", _owning_class, *,
                  _loader: "JsonAndCommandLineConfigLoader", help_hidden: bool,
-                 group: "Optional[argparse._ArgumentGroup]", _fallback_names: "list[str]" = None,
-                 _legacy_alias_names: "list[str]" = None, **kwargs):
+                 group: "Optional[argparse._ArgumentGroup]", _fallback_names: "Optional[list[str]]" = None,
+                 _legacy_alias_names: "Optional[list[str]]" = None, **kwargs):
         super().__init__(name, shortname, default, value_type, _owning_class, _loader=_loader,
                          _fallback_names=_fallback_names, _legacy_alias_names=_legacy_alias_names)
         # hide obscure options unless --help-hidden/--help/all is passed
@@ -291,16 +290,16 @@ class JsonAndCommandLineConfigOption(CommandLineConfigOption[T]):
         # First check the value specified on the command line, then load JSON and then fallback to the default
         from_cmd_line = self._load_from_commandline()
         # config_debug(full_option_name, "from cmdline:", from_cmd_line)
-        if from_cmd_line is not None:
-            if from_cmd_line != self.action.default:
-                return from_cmd_line
+        if from_cmd_line is not None and from_cmd_line != self.action.default:
+            return from_cmd_line
             # config_debug("Command line == default:", from_cmd_line, self.action.default, "-> trying JSON")
         # try loading it from the JSON file:
         from_json = self._load_from_json(target_option_name)
         # self.debug_msg(full_option_name, "from JSON:", from_json)
         if from_json is not None:
-            status_update("Overriding default value for", target_option_name, "with value from JSON key",
-                          from_json.used_key, "->", from_json.value, file=sys.stderr)
+            if not config.quiet:
+                status_update("Overriding default value for", target_option_name, "with value from JSON key",
+                              from_json.used_key, "->", from_json.value, file=sys.stderr)
             return from_json
         return None  # not found -> fall back to default
 
@@ -312,9 +311,9 @@ class JsonAndCommandLineConfigOption(CommandLineConfigOption[T]):
         json_key = json_path[-1]  # last item is the key (e.g. llvm/build-type -> build-type)
         json_path = json_path[:-1]  # all but the last item is the path (e.g. llvm/build-type -> llvm)
         json_object = self._loader._json
-        for objRef in json_path:
+        for obj_ref in json_path:
             # Return an empty dict if it is not found
-            json_object = json_object.get(objRef, None)
+            json_object = json_object.get(obj_ref, None)
             if json_object is None:
                 return None
             json_object = json_object.value
@@ -324,9 +323,9 @@ class JsonAndCommandLineConfigOption(CommandLineConfigOption[T]):
         result = self._lookup_key_in_json(full_option_name)
         # See if any of the other long option names is a valid key name:
         if result is None:
-            for optionName in self.action.option_strings:
-                if optionName.startswith("--"):
-                    json_key = optionName[2:]
+            for option_name in self.action.option_strings:
+                if option_name.startswith("--"):
+                    json_key = option_name[2:]
                     result = self._lookup_key_in_json(json_key)
                     if result is not None:
                         warning_message("Old JSON key", json_key, "used, please use", full_option_name, "instead")
@@ -366,7 +365,7 @@ def dict_raise_on_duplicates_and_store_src(ordered_pairs, src_file) -> "dict[Any
     d = {}
     for k, v in ordered_pairs:
         if k in d:
-            raise SyntaxError("duplicate key: %r" % (k,))
+            raise SyntaxError(f"duplicate key: {k!r}")
         else:
             # Ensure all values store the source file
             d[k] = _LoadedConfigValue(v, src_file, used_key=k)
@@ -576,10 +575,10 @@ class JsonAndCommandLineConfigLoader(CommandLineConfigLoader):
                 continue
             if key in a:
                 if a[key].is_nested_dict() and b[key].is_nested_dict():
-                    self.merge_dict_recursive(a[key].value, b[key].value, included_file, base_file, path + [str(key)])
+                    self.merge_dict_recursive(a[key].value, b[key].value, included_file, base_file, [*path, str(key)])
                 elif a[key] != b[key]:
                     if self._parsed_args:
-                        self.debug_msg("Overriding '" + '.'.join(path + [str(key)]) + "' value", b[key], " from",
+                        self.debug_msg("Overriding '" + '.'.join([*path, str(key)]) + "' value", b[key], " from",
                                        included_file, "with value ", a[key], "from", base_file)
                 else:
                     pass  # same leaf value
@@ -678,10 +677,9 @@ class JsonAndCommandLineConfigLoader(CommandLineConfigLoader):
                     if fullname == alternate_name:
                         found_option = option  # fine
                         break
-                if option.alias_names:
-                    if fullname in option.alias_names:
-                        found_option = option  # fine
-                        break
+                if option.alias_names and fullname in option.alias_names:
+                    found_option = option  # fine
+                    break
 
         if found_option is not None:
             # Found an option, now verify that it's not a command-line only option

@@ -29,12 +29,13 @@
 #
 
 from .cmake_project import CMakeProject
-from .project import BuildType, GitRepository, ComputedDefaultValue
+from .project import BuildType, ComputedDefaultValue, GitRepository
+from .simple_project import BoolConfigOption, IntConfigOption
 from ..config.compilation_targets import CompilationTargets
 
 
 class BuildCheriOS(CMakeProject):
-    dependencies = ["cherios-llvm", "makefs-linux"]
+    dependencies = ("cherios-llvm", "makefs-linux")
     default_build_type = BuildType.DEBUG
     repository = GitRepository("https://github.com/CTSRD-CHERI/cherios.git", default_branch="master")
     _default_install_dir_fn = ComputedDefaultValue(
@@ -42,13 +43,10 @@ class BuildCheriOS(CMakeProject):
                                                          p.crosscompile_target.build_suffix(config, include_os=False)),
         as_string="$OUTPUT_ROOT/cherios-{mips64,riscv64}")
     needs_sysroot = False
-    supported_architectures = [CompilationTargets.CHERIOS_MIPS_PURECAP, CompilationTargets.CHERIOS_RISCV_PURECAP]
+    supported_architectures = (CompilationTargets.CHERIOS_MIPS_PURECAP, CompilationTargets.CHERIOS_RISCV_PURECAP)
 
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(**kwargs)
-        cls.smp_cores = cls.add_config_option("smp-cores", default=1, kind=int)
-        cls.build_net = cls.add_bool_option("build-net", default=False)
+    smp_cores = IntConfigOption("smp-cores", default=1, help="Number of cores to use")
+    build_net = BoolConfigOption("build-net", default=False, help="Include networking support")
 
     def setup(self):
         super().setup()

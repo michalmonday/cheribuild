@@ -32,12 +32,12 @@ import os
 import shlex
 import sys
 import typing
-from abc import abstractmethod, ABC
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Union, Callable
+from typing import Callable, Optional, Union
 
 from .computed_default_value import ComputedDefaultValue
-from ..utils import fatal_error, warning_message, ConfigBase
+from ..utils import ConfigBase, fatal_error, warning_message
 
 T = typing.TypeVar('T')
 
@@ -48,7 +48,7 @@ if typing.TYPE_CHECKING:
 class _LoadedConfigValue:
     """A simple class to hold the loaded value as well as the source (to handle relative paths correctly)"""
 
-    def __init__(self, value, loaded_from: "Optional[Path]", used_key: str = None):
+    def __init__(self, value, loaded_from: "Optional[Path]", used_key: "Optional[str]" = None):
         # assert value is not None, used_key + " is None"
         self.value = value
         self.loaded_from = loaded_from
@@ -65,8 +65,8 @@ class ConfigLoaderBase(ABC):
     # will be set later...
     _cheri_config: ConfigBase
 
-    options: "dict[str, ConfigOptionBase]" = {}
-    _json: "dict[str, _LoadedConfigValue]" = {}
+    options: "typing.ClassVar[dict[str, ConfigOptionBase]]" = {}
+    _json: "typing.ClassVar[dict[str, _LoadedConfigValue]]" = {}
     is_completing_arguments: bool = "_ARGCOMPLETE" in os.environ
     is_generating_readme: bool = "_GENERATING_README" in os.environ
     is_running_unit_tests: bool = False
@@ -107,11 +107,19 @@ class ConfigLoaderBase(ABC):
     # noinspection PyShadowingBuiltins
     def add_option(self, name: str, shortname=None, *, type: "Union[type[T], Callable[[str], T]]" = str,
                    default: "Union[ComputedDefaultValue[T], Optional[T], Callable[[ConfigBase, typing.Any], T]]" = None,
-                   _owning_class: type = None, _fallback_names: "list[str]" = None,
+                   _owning_class: "Optional[type]" = None, _fallback_names: "Optional[list[str]]" = None,
                    option_cls: "Optional[type[ConfigOptionBase[T]]]" = None, **kwargs) -> T:
         if option_cls is None:
             option_cls = self.__option_cls
 
+        # If there is a option this one inherits the value from (e.g. cheribsd-riscv64-purecap/foo -> cheribsd/foo),
+        # we register the fallback option when we first encounter a usage.
+        if _fallback_names:
+            for fallback_name in _fallback_names:
+                fallback_option = self.options.get(fallback_name)
+                if fallback_option is None:
+                    # Do not assign an owning class or a default value to this implicitly added fallback option.
+                    fallback_option = self.add_option(fallback_name, type=type, option_cls=option_cls)
         result = option_cls(name, shortname, default, type, _owning_class, _loader=self,
                             _fallback_names=_fallback_names, **kwargs)
         assert name not in self.options  # make sure we don't add duplicate options
@@ -123,9 +131,16 @@ class ConfigLoaderBase(ABC):
         # noinspection PyTypeChecker
         return self.add_option(name, shortname, default=default, type=bool, **kwargs)
 
-    def add_path_option(self, name: str, shortname=None, **kwargs) -> Path:
+    def add_path_option(self, name: str, *,
+                        default: "Union[ComputedDefaultValue[Path], Path, Callable[[ConfigBase, typing.Any], Path]]",
+                        shortname=None, **kwargs) -> Path:
         # we have to make sure we resolve this to an absolute path because otherwise steps where CWD is different fail!
-        return self.add_option(name, shortname, type=Path, **kwargs)
+        return typing.cast(Path, self.add_option(name, shortname, type=Path, default=default, **kwargs))
+
+    def add_optional_path_option(self, name: str, *, default: "Optional[Path]" = None, shortname=None,
+                                 **kwargs) -> Path:
+        # we have to make sure we resolve this to an absolute path because otherwise steps where CWD is different fail!
+        return self.add_option(name, shortname, type=Path, default=default, **kwargs)
 
     @abstractmethod
     def load(self) -> None:
@@ -144,6 +159,7 @@ class ConfigLoaderBase(ABC):
     def reset(self) -> None:
         for option in self.options.values():
             option._cached = None
+            option._is_default_value = False
 
     def debug_msg(self, *args, sep=" ", **kwargs) -> None:
         pass
@@ -169,8 +185,8 @@ class ConfigLoaderBase(ABC):
 class ConfigOptionBase(typing.Generic[T]):
     def __init__(self, name: str, shortname: Optional[str], default,
                  value_type: "Union[type[T], Callable[[typing.Any], T]]", _owning_class=None, *,
-                 _loader: ConfigLoaderBase = None, _fallback_names: "list[str]" = None,
-                 _legacy_alias_names: "list[str]" = None):
+                 _loader: "Optional[ConfigLoaderBase]" = None, _fallback_names: "Optional[list[str]]" = None,
+                 _legacy_alias_names: "Optional[list[str]]" = None):
         self.name = name
         self.shortname = shortname
         self.default = default
@@ -179,6 +195,10 @@ class ConfigOptionBase(typing.Generic[T]):
         self._loader = _loader
         # if none it means the global CheriConfig is the class containing this option
         self._owning_class = _owning_class
+        if _fallback_names:
+            assert _loader is not None
+            for name in _fallback_names:
+                assert _loader.options.get(name) is not None or _loader.is_completing_arguments
         self._fallback_names = _fallback_names  # for targets such as gdb-mips, etc
         self.alias_names = _legacy_alias_names  # for targets such as gdb-mips, etc
         self._is_default_value = False
@@ -217,7 +237,7 @@ class ConfigOptionBase(typing.Generic[T]):
             result = self._convert_type(result)
         except ValueError as e:
             fatal_error("Invalid value for option '", self.full_option_name,
-                        "': could not convert '", result, "': ", str(e), sep="")
+                        "': could not convert '", result, "': ", str(e), sep="", pretend=config.pretend)
             sys.exit()
         return result
 
@@ -289,7 +309,7 @@ class ConfigOptionBase(typing.Generic[T]):
         return result
 
     def __repr__(self) -> str:
-        return "<{}({}) type={} cached={}>".format(self.__class__.__name__, self.name, self.value_type, self._cached)
+        return f"<{self.__class__.__name__}({self.name}) type={self.value_type} cached={self._cached}>"
 
 
 class DefaultValueOnlyConfigOption(ConfigOptionBase[T]):

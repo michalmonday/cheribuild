@@ -22,16 +22,15 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from .crosscompileproject import CrossCompileCMakeProject, GitRepository, CompilationTargets
+from .crosscompileproject import CompilationTargets, CrossCompileCMakeProject, GitRepository
 
 
 class BuildDBus(CrossCompileCMakeProject):
     target = "dbus"
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
     repository = GitRepository("https://gitlab.freedesktop.org/dbus/dbus.git",
-                               temporary_url_override="https://gitlab.freedesktop.org/arichardson/dbus.git",
-                               url_override_reason="Various fixes for FreeBSD and CHERI (most submitted as MRs)")
-    dependencies = ["libexpat"]
+                               old_urls=[b"https://gitlab.freedesktop.org/arichardson/dbus.git"])
+    dependencies = ("libexpat",)
     ctest_script_extra_args = ["--test-timeout", str(120 * 60)]  # Tests can take a long time to run
 
     def setup(self):

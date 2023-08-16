@@ -14,7 +14,8 @@ macOS 10.14 and newer is also supported.
 
 # Pre-Build Setup
 #### macOS
-When building on macOS the following packages are required:
+When building on macOS the following commands will install the packages required for
+the most commonly used cheribuild targets:
 ```shell
 brew install cmake ninja libarchive git glib gnu-sed automake autoconf coreutils llvm make wget pixman pkg-config xz
 # Install samba for shared mounts between host and CheriBSD on QEMU
@@ -25,29 +26,49 @@ brew install homebrew/cask/docker homebrew/cask/xquartz socat dtc
 
 
 #### Debian/Ubuntu
-If you are building CHERI on a Debian/Ubuntu-based machine, please install the following packages:
+If you are building CHERI on a Debian/Ubuntu-based machine, the following command will install the packages required for
+the most commonly used cheribuild targets:
 
 ```shell
-apt install autoconf automake libtool pkg-config clang bison cmake ninja-build samba flex texinfo time libglib2.0-dev libpixman-1-dev libarchive-dev libarchive-tools libbz2-dev libattr1-dev libcap-ng-dev
+apt install autoconf automake libtool pkg-config clang bison cmake mercurial ninja-build samba flex texinfo time libglib2.0-dev libpixman-1-dev libarchive-dev libarchive-tools libbz2-dev libattr1-dev libcap-ng-dev libexpat1-dev libgmp-dev
 ```
 
 Older versions of Ubuntu may report errors when trying to install `libarchive-tools`. In this case try using `apt install bsdtar` instead.
 
 #### RHEL/Fedora
-If you are building CHERI on a RHEL/Fedora-based machine, please install the following packages:
+If you are building CHERI on a RHEL/Fedora-based machine, the following command will install the packages required for
+the most commonly used cheribuild targets:
 
 ```shell
-dnf install libtool clang-devel bison cmake ninja-build samba flex texinfo glib2-devel pixman-devel libarchive-devel bsdtar bzip2-devel libattr-devel libcap-ng-devel expat-devel
+dnf install libtool clang-devel bison cmake mercurial ninja-build samba flex texinfo glib2-devel pixman-devel libarchive-devel bsdtar bzip2-devel libattr-devel libcap-ng-devel expat-devel
+```
+
+#### FreeBSD
+If you are building CHERI on a FreeBSD machine, the following command will install the packages required for
+the most commonly used cheribuild targets:
+
+```shell
+pkg install autoconf automake bison cmake expat glib gsed llvm mercurial meson ninja pkgconf pixman samba
 ```
 
 #### Arch Linux
-If you are building CHERI on an Arch Linux machine, please install the following packages:
+If you are building CHERI on an Arch Linux machine, the following command will install the packages required for
+the most commonly used cheribuild targets:
 
 ```shell
-pacman -Syu autoconf automake libtool pkgconf clang bison cmake ninja samba flex texinfo time glib2 pixman libarchive bzip2 attr libcap-ng inetutils
+pacman -Syu autoconf automake libtool pkgconf clang bison cmake ninja samba flex texinfo time glib2 pixman libarchive bzip2 attr libcap-ng inetutils mercurial expat gmp
 ```
 
 These package used approx 350MiB, though you probably have most already installed.
+
+# Contributing
+
+If you would like to make a change to cheribuild, please submit it as a GitHub pull request to
+https://github.com/CTSRD-CHERI/cheribuild.
+Cheribuild includes some pre-commit and pre-push hooks (using
+[pre-commit](https://github.com/pre-commit/pre-commit)) that can catch issues that will
+fail the pull request CI checks. To install the hooks, run the following command
+`python3 -m pip install -U --user pre-commit && pre-commit install -t pre-commit -t pre-push`.
 
 # Basic usage
 
@@ -237,7 +258,7 @@ Host cheribsd-riscv
   ControlPath ~/.ssh/controlmasters/%r@%h:%p
   ControlMaster auto
   StrictHostKeyChecking no
-  
+
 Host cheribsd-riscv-purecap
   User root
   Port 12346
@@ -357,7 +378,7 @@ I would also suggest using `set autolist` to display all options.
 
 <!-- BEGIN HELP OUTPUT -->
 ```
-usage: cheribuild.py [-h] [--config-file FILE] [--help-all] [--pretend] [--build] [--test] [--benchmark]
+usage: cheribuild.py [-h] [--help-all] [--config-file FILE] [--pretend] [--build] [--test] [--benchmark]
                      [--build-and-test] [--list-targets] [--dump-configuration] [--print-targets-only]
                      [--clang-path CLANG-PATH] [--clang++-path CLANG++-PATH] [--clang-cpp-path CLANG-CPP-PATH]
                      [--pass-k-to-make] [--with-libstatcounters | --no-with-libstatcounters]
@@ -406,7 +427,6 @@ usage: cheribuild.py [-h] [--config-file FILE] [--help-all] [--pretend] [--build
                      [--build-root BUILD-ROOT] [--tools-root TOOLS-ROOT] [--morello-sdk-root MORELLO-SDK-ROOT]
                      [--sysroot-install-root SYSROOT-INSTALL-ROOT] [--upstream-qemu/targets UPSTREAM-QEMU/TARGETS]
                      [--qemu/targets QEMU/TARGETS] [--qemu/statistics | --qemu/no-statistics]
-                     [--run-rtems/ephemeral | --run-rtems/no-ephemeral]
                      [--cheri-syzkaller/run-sysgen | --cheri-syzkaller/no-run-sysgen]
                      [--run-syzkaller/syz-config RUN-SYZKALLER/SYZ-CONFIG]
                      [--run-syzkaller/ssh-privkey syzkaller_id_rsa] [--run-syzkaller/workdir DIR]
@@ -440,25 +460,25 @@ usage: cheribuild.py [-h] [--config-file FILE] [--help-all] [--pretend] [--build
                      [--cheribsd-release/build-bench-kernels | --cheribsd-release/no-build-bench-kernels]
                      [--cheribsd-release/caprevoke-kernel | --cheribsd-release/no-caprevoke-kernel]
                      [--cheribsd-sysroot/remote-sdk-path PATH] [--disk-image-minimal/extra-files DIR]
-                     [--disk-image-minimal/path IMGPATH] [--disk-image-mfs-root/extra-files DIR]
-                     [--disk-image-mfs-root/path IMGPATH] [--disk-image/extra-files DIR] [--disk-image/path IMGPATH]
-                     [--rootfs-tarball/extra-files DIR] [--rootfs-tarball/path IMGPATH]
-                     [--disk-image-freebsd/extra-files DIR] [--disk-image-freebsd/path IMGPATH] [--freertos/demo DEMO]
-                     [--freertos/prog PROG] [--freertos/bsp BSP] [--run/ssh-forwarding-port PORT]
+                     [--disk-image-minimal/rootfs-type {ufs,zfs}] [--disk-image-minimal/path IMGPATH]
+                     [--disk-image-mfs-root/extra-files DIR] [--disk-image-mfs-root/rootfs-type {ufs,zfs}]
+                     [--disk-image-mfs-root/path IMGPATH] [--disk-image/extra-files DIR]
+                     [--disk-image/rootfs-type {ufs,zfs}] [--disk-image/path IMGPATH] [--rootfs-tarball/extra-files DIR]
+                     [--rootfs-tarball/rootfs-type {ufs,zfs}] [--rootfs-tarball/path IMGPATH]
+                     [--disk-image-freebsd/extra-files DIR] [--disk-image-freebsd/rootfs-type {ufs,zfs}]
+                     [--disk-image-freebsd/path IMGPATH] [--run/ssh-forwarding-port PORT]
                      [--run/ephemeral | --run/no-ephemeral] [--run/remote-kernel-path RUN/REMOTE-KERNEL-PATH]
                      [--run/alternative-kernel RUN/ALTERNATIVE-KERNEL] [--run/kernel-abi {hybrid,purecap}]
-                     [--run-freertos/ephemeral | --run-freertos/no-ephemeral] [--run-freertos/demo DEMO]
-                     [--run-freertos/prog PROG] [--run-freertos/bsp BSP] [--run-minimal/ssh-forwarding-port PORT]
-                     [--run-minimal/ephemeral | --run-minimal/no-ephemeral]
+                     [--run-minimal/ssh-forwarding-port PORT] [--run-minimal/ephemeral | --run-minimal/no-ephemeral]
                      [--run-minimal/remote-kernel-path RUN-MINIMAL/REMOTE-KERNEL-PATH]
                      [--run-minimal/alternative-kernel RUN-MINIMAL/ALTERNATIVE-KERNEL]
                      [--run-minimal/kernel-abi {hybrid,purecap}] [--run-mfs-root/ssh-forwarding-port PORT]
-                     [--run-mfs-root/ephemeral | --run-mfs-root/no-ephemeral]
                      [--run-mfs-root/remote-kernel-path RUN-MFS-ROOT/REMOTE-KERNEL-PATH]
                      [--run-mfs-root/alternative-kernel RUN-MFS-ROOT/ALTERNATIVE-KERNEL]
                      [--run-mfs-root/kernel-abi {hybrid,purecap}] [--sslproc/build-tests | --sslproc/no-build-tests]
-                     [--bash/set-as-root-shell | --bash/no-set-as-root-shell]
-                     [--qtbase-dev/build-tests | --qtbase-dev/no-build-tests]
+                     [--bash/set-as-root-shell | --bash/no-set-as-root-shell] [--freertos/demo DEMO]
+                     [--freertos/prog PROG] [--freertos/bsp BSP] [--run-freertos/demo DEMO] [--run-freertos/prog PROG]
+                     [--run-freertos/bsp BSP] [--qtbase-dev/build-tests | --qtbase-dev/no-build-tests]
                      [--qtbase-dev/build-examples | --qtbase-dev/no-build-examples]
                      [--qtbase-dev/assertions | --qtbase-dev/no-assertions]
                      [--qtbase-dev/minimal | --qtbase-dev/no-minimal]
@@ -471,7 +491,7 @@ usage: cheribuild.py [-h] [--config-file FILE] [--help-all] [--pretend] [--build
 positional arguments:
   TARGET                The targets to build
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --help-all, --help-hidden
                         Show all help options, including the target-specific ones.
@@ -706,8 +726,8 @@ Options controlling the use of docker for building:
 
 Options for target 'upstream-qemu':
   --upstream-qemu/targets UPSTREAM-QEMU/TARGETS
-                        Build QEMU for the following targets (default:
-                        'aarch64-softmmu,mips64-softmmu,riscv64-softmmu,riscv32-softmmu,x86_64-softmmu')
+                        Build QEMU for the following targets (default: 'arm-
+                        softmmu,aarch64-softmmu,mips64-softmmu,riscv64-softmmu,riscv32-softmmu,x86_64-softmmu')
 
 Options for target 'qemu':
   --qemu/targets QEMU/TARGETS
@@ -716,10 +736,6 @@ Options for target 'qemu':
                         softmmu,riscv32-softmmu,riscv32cheri-softmmu,x86_64-softmmu')
   --qemu/statistics, --qemu/no-statistics
                         Collect statistics on out-of-bounds capability creation. (default: 'False')
-
-Options for target 'run-rtems':
-  --run-rtems/ephemeral, --run-rtems/no-ephemeral
-                        Run qemu in 'snapshot' mode, changes to the disk image are non-persistent (default: 'False')
 
 Options for target 'cheri-syzkaller':
   --cheri-syzkaller/run-sysgen, --cheri-syzkaller/no-run-sysgen
@@ -838,6 +854,8 @@ Options for target 'disk-image-minimal':
   --disk-image-minimal/extra-files DIR
                         A directory with additional files that will be added to the image (default: '$SOURCE_ROOT/extra-
                         files-minimal')
+  --disk-image-minimal/rootfs-type {ufs,zfs}
+                        Select the type of the root file system image. (default: 'ufs')
   --disk-image-minimal/path IMGPATH
                         The output path for the disk image (default: '$OUTPUT_ROOT/cheribsd-minimal-<TARGET>-disk.img
                         depending on architecture')
@@ -846,6 +864,8 @@ Options for target 'disk-image-mfs-root':
   --disk-image-mfs-root/extra-files DIR
                         A directory with additional files that will be added to the image (default: '$SOURCE_ROOT/extra-
                         files-minimal')
+  --disk-image-mfs-root/rootfs-type {ufs,zfs}
+                        Select the type of the root file system image. (default: 'ufs')
   --disk-image-mfs-root/path IMGPATH
                         The output path for the disk image (default: '$OUTPUT_ROOT/cheribsd-mfs-root-<TARGET>-disk.img
                         depending on architecture')
@@ -854,6 +874,8 @@ Options for target 'disk-image':
   --disk-image/extra-files DIR
                         A directory with additional files that will be added to the image (default: '$SOURCE_ROOT/extra-
                         files')
+  --disk-image/rootfs-type {ufs,zfs}
+                        Select the type of the root file system image. (default: 'ufs')
   --disk-image/path IMGPATH
                         The output path for the disk image (default: '$OUTPUT_ROOT/cheribsd-<TARGET>-disk.img depending
                         on architecture')
@@ -862,6 +884,8 @@ Options for target 'rootfs-tarball':
   --rootfs-tarball/extra-files DIR
                         A directory with additional files that will be added to the image (default: '$SOURCE_ROOT/extra-
                         files')
+  --rootfs-tarball/rootfs-type {ufs,zfs}
+                        Select the type of the root file system image. (default: 'ufs')
   --rootfs-tarball/path IMGPATH
                         The output path for the disk image (default: '$OUTPUT_ROOT/cheribsd-<TARGET>.tar.xz depending on
                         architecture')
@@ -870,16 +894,11 @@ Options for target 'disk-image-freebsd':
   --disk-image-freebsd/extra-files DIR
                         A directory with additional files that will be added to the image (default: '$SOURCE_ROOT/extra-
                         files')
+  --disk-image-freebsd/rootfs-type {ufs,zfs}
+                        Select the type of the root file system image. (default: 'ufs')
   --disk-image-freebsd/path IMGPATH
                         The output path for the disk image (default: '$OUTPUT_ROOT/freebsd-<TARGET>-disk.img depending
                         on architecture')
-
-Options for target 'freertos':
-  --freertos/demo DEMO  The FreeRTOS Demo build. (default: 'RISC-V-Generic')
-  --freertos/prog PROG  The FreeRTOS program to build. (default: 'main_blinky')
-  --freertos/bsp BSP    The FreeRTOS BSP to build. This is only valid for the paramterized RISC-V-Generic. The BSP
-                        option chooses platform, RISC-V arch and RISC-V abi in the $platform-$arch-$abi format. See
-                        RISC-V-Generic/README for more details (default: 'target-dependent default')
 
 Options for target 'run':
   --run/ssh-forwarding-port PORT
@@ -895,18 +914,6 @@ Options for target 'run':
                         kernel configurations is given by --list-kernels
   --run/kernel-abi {hybrid,purecap}
                         Select extra kernel variant with the given ABI to run.
-
-Options for target 'run-freertos':
-  --run-freertos/ephemeral, --run-freertos/no-ephemeral
-                        Run qemu in 'snapshot' mode, changes to the disk image are non-persistent (default: 'False')
-  --run-freertos/demo DEMO
-                        The FreeRTOS Demo to run. (default: 'RISC-V-Generic')
-  --run-freertos/prog PROG
-                        The FreeRTOS program to run. (default: 'main_blinky')
-  --run-freertos/bsp BSP
-                        The FreeRTOS BSP to run. This is only valid for the paramterized RISC-V-Generic. The BSP option
-                        chooses platform, RISC-V arch and RISC-V abi in the $platform-$arch-$abi format. See RISC-V-
-                        Generic/README for more details (default: 'target-dependent default')
 
 Options for target 'run-minimal':
   --run-minimal/ssh-forwarding-port PORT
@@ -927,8 +934,6 @@ Options for target 'run-mfs-root':
   --run-mfs-root/ssh-forwarding-port PORT
                         The port on localhost to forward to the QEMU ssh port. You can then use `ssh root@localhost -p
                         $PORT` to connect to the VM (default: '<UID-dependent>')
-  --run-mfs-root/ephemeral, --run-mfs-root/no-ephemeral
-                        Run qemu in 'snapshot' mode, changes to the disk image are non-persistent (default: 'False')
   --run-mfs-root/remote-kernel-path RUN-MFS-ROOT/REMOTE-KERNEL-PATH
                         When set rsync will be used to update the kernel image from a remote host before launching QEMU.
                         Useful when building and running on separate machines.
@@ -945,6 +950,23 @@ Options for target 'sslproc':
 Options for target 'bash':
   --bash/set-as-root-shell, --bash/no-set-as-root-shell
                         Set root's shell to bash (in the target rootfs) (default: 'False')
+
+Options for target 'freertos':
+  --freertos/demo DEMO  The FreeRTOS Demo build. (default: 'RISC-V-Generic')
+  --freertos/prog PROG  The FreeRTOS program to build. (default: 'main_blinky')
+  --freertos/bsp BSP    The FreeRTOS BSP to build. This is only valid for the paramterized RISC-V-Generic. The BSP
+                        option chooses platform, RISC-V arch and RISC-V abi in the $platform-$arch-$abi format. See
+                        RISC-V-Generic/README for more details (default: 'target-dependent default')
+
+Options for target 'run-freertos':
+  --run-freertos/demo DEMO
+                        The FreeRTOS Demo to run. (default: 'RISC-V-Generic')
+  --run-freertos/prog PROG
+                        The FreeRTOS program to run. (default: 'main_blinky')
+  --run-freertos/bsp BSP
+                        The FreeRTOS BSP to run. This is only valid for the paramterized RISC-V-Generic. The BSP option
+                        chooses platform, RISC-V arch and RISC-V abi in the $platform-$arch-$abi format. See RISC-V-
+                        Generic/README for more details (default: 'target-dependent default')
 
 Options for target 'qtbase-dev':
   --qtbase-dev/build-tests, --qtbase-dev/no-build-tests

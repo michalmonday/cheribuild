@@ -29,8 +29,6 @@
 #
 
 import os
-import shutil
-from pathlib import Path
 
 from .project import DefaultInstallDir, GitRepository, MakeCommandKind, Project
 from ..utils import OSInfo
@@ -85,7 +83,7 @@ class BuildSamba(Project):
             "--without-winbind",
             # "--without-json-audit", "--without-ldb-lmdb", (only needed in master not 4.8 stable)
             "--prefix=" + str(self.install_dir),
-            ])
+        ])
         #  version 4.9 "--without-json-audit",
         self.configure_args.append("--without-json")
 
@@ -99,7 +97,7 @@ class BuildSamba(Project):
             self.configure_args.extend([
                 # Avoid depending on libraries from the build tree:
                 "--bundled-libraries=ALL", "--with-static-modules=ALL",
-                "--enable-debug"
+                "--enable-debug",
             ])
         else:
             self.configure_args.extend([
@@ -107,8 +105,6 @@ class BuildSamba(Project):
                 # Avoid depending on libraries from the build tree:
                 "--bundled-libraries=talloc,tdb,pytdb,ldb,pyldb,tevent,pytevent", "--with-static-modules=ALL",
             ])
-        # Add the yapp binary
-        self.configure_environment["PATH"] = os.getenv("PATH") + ":" + str(Path(shutil.which("perl")).resolve().parent)
         super().configure(cwd=self.source_dir, **kwargs)
 
     def compile(self, **kwargs):

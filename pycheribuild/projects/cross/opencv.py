@@ -22,13 +22,13 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-from .crosscompileproject import CrossCompileCMakeProject, GitRepository, BuildType
+from .crosscompileproject import BuildType, CrossCompileCMakeProject, GitRepository
 
 
 class BuildOpenCV(CrossCompileCMakeProject):
     target = "opencv"
     repository = GitRepository("https://github.com/opencv/opencv.git")
-    dependencies = ["libpng", "libjpeg-turbo", "openjpeg"]
+    dependencies = ("libpng", "libjpeg-turbo", "openjpeg")
     # Not working yet, debug makes it easier to track down errors
     # Additionally, the Morello compiler crashes when building in Release mode.
     default_build_type = BuildType.DEBUG

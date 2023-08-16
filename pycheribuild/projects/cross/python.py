@@ -30,8 +30,13 @@
 
 import os
 
-from .crosscompileproject import (BuildType, CompilationTargets, CrossCompileAutotoolsProject,
-                                  DefaultInstallDir, GitRepository)
+from .crosscompileproject import (
+    BuildType,
+    CompilationTargets,
+    CrossCompileAutotoolsProject,
+    DefaultInstallDir,
+    GitRepository,
+)
 from ...utils import is_case_sensitive_dir
 
 
@@ -53,19 +58,26 @@ class BuildPython(CrossCompileAutotoolsProject):
         if self.compiling_for_cheri():
             # computed gotos currently crash the compiler...
             self.configure_args.append("--without-computed-gotos")
+            self.configure_args.append("--without-pymalloc")  # use system malloc
         else:
             self.configure_args.append("--with-computed-gotos")
 
         # fails to cross-compile and does weird stuff on host (uses wrong python version?)
         self.configure_args.append("--without-ensurepip")
+        if self.compiling_for_host() and self.compiling_for_cheri():
+            self.check_required_system_tool("/usr/local64/bin/python3.8", freebsd="python38", compat_abi=True)
+            # Can't use the local python build for bootstrapping tasks yet:
+            self.add_configure_vars(PYTHON_FOR_BUILD="/usr/local64/bin/python3.8")
+            self.add_configure_vars(PYTHON_FOR_REGEN="/usr/local64/bin/python3.8")
 
         if not self.compiling_for_host():
-            self.configure_args.append("--without-pymalloc")  # use system malloc
             self.configure_args.append("--without-doc-strings")  # should reduce size
-            native_python = self.get_instance_for_cross_target(CompilationTargets.NATIVE,
+            native_python = self.get_instance_for_cross_target(CompilationTargets.NATIVE_NON_PURECAP,
                                                                self.config).install_dir / "bin/python3"
             if not native_python.exists():
-                self.fatal("Native python3 doesn't exist, you must build the `python-native` target first.")
+                self.dependency_error("Native python3 doesn't exist, you must build the `python-native` target first.",
+                                      cheribuild_target="python",
+                                      cheribuild_xtarget=CompilationTargets.NATIVE_NON_PURECAP)
             self.add_configure_vars(
                 ac_cv_buggy_getaddrinfo="no",
                 # Doesn't work since that remove all flags, need to set PATH instead
@@ -81,10 +93,6 @@ class BuildPython(CrossCompileAutotoolsProject):
             # self.configure_environment["ac_cv_file__dev_ptc+set"] = "set"
             # TODO: do I need to set? ac_sys_release=13.0
         super().configure(**kwargs)
-
-    def should_use_extra_c_compat_flags(self):
-        # Use -data-dependent provenance to avoid bitwise warnigns
-        return True
 
     def run_tests(self):
         # python build system adds .exe for case-insensitive dirs

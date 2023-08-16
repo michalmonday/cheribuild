@@ -35,18 +35,26 @@ import sys
 import typing
 from abc import ABCMeta, abstractmethod
 from pathlib import Path
+from typing import Optional
 
 from .chericonfig import CheriConfig
-from .config_loader_base import ConfigOptionBase, ConfigLoaderBase
-from .target_info import (AutoVarInit, BasicCompilationTargets, CPUArchitecture, CrossCompileTarget, MipsFloatAbi,
-                          TargetInfo, AArch64FloatSimdOptions)
+from .config_loader_base import ConfigLoaderBase, ConfigOptionBase
+from .target_info import (
+    AArch64FloatSimdOptions,
+    AutoVarInit,
+    BasicCompilationTargets,
+    CPUArchitecture,
+    CrossCompileTarget,
+    DefaultInstallDir,
+    MipsFloatAbi,
+    TargetInfo,
+)
 from ..projects.project import Project
 from ..utils import cached_property, is_jenkins_build
 
-
 if typing.TYPE_CHECKING:  # no-combine
-    from ..projects.run_qemu import AbstractLaunchFreeBSD  # no-combine
     from ..projects.cross.llvm import BuildLLVMMonoRepoBase  # no-combine
+    from ..projects.run_qemu import AbstractLaunchFreeBSD  # no-combine
 
 
 class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
@@ -54,7 +62,7 @@ class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
 
     def __init__(self, target, project) -> None:
         super().__init__(target, project)
-        self._sdk_root_dir: typing.Optional[Path] = None
+        self._sdk_root_dir: Optional[Path] = None
 
     @property
     def _compiler_dir(self) -> Path:
@@ -68,15 +76,34 @@ class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
         return self._sdk_root_dir
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         raise NotImplementedError()
 
     def _get_sdk_root_dir_lazy(self) -> Path:
         return self._get_compiler_project().get_native_install_path(self.config)
 
     @classmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
-        return [cls._get_compiler_project().get_class_for_target(BasicCompilationTargets.NATIVE).target]
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
+        return [cls._get_compiler_project().get_class_for_target(BasicCompilationTargets.NATIVE_NON_PURECAP).target]
+
+    def _rootfs_path(self) -> Path:
+        xtarget = self.target.get_rootfs_target()
+        # noinspection PyUnresolvedReferences
+        return self._get_rootfs_class(xtarget).get_install_dir(self, xtarget)
+
+    def default_install_dir(self, install_dir: DefaultInstallDir) -> Path:
+        if install_dir == DefaultInstallDir.ROOTFS_OPTBASE:
+            project = self.project
+            if hasattr(project, "path_in_rootfs"):
+                assert project.path_in_rootfs.startswith("/"), project.path_in_rootfs
+                return self._rootfs_path() / project.path_in_rootfs[1:]
+            # noinspection PyUnresolvedReferences
+            return self._rootfs_path() / "opt" / self.install_prefix_dirname / project._rootfs_install_dir_name
+        elif install_dir == DefaultInstallDir.KDE_PREFIX:
+            return Path(self._rootfs_path(), "opt", self.install_prefix_dirname, "kde")
+        elif install_dir == DefaultInstallDir.ROOTFS_LOCALBASE:
+            return self.sysroot_dir
+        return super().default_install_dir(install_dir)
 
     @property
     def c_compiler(self) -> Path:
@@ -120,7 +147,7 @@ class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
 
     @classmethod
     def essential_compiler_and_linker_flags_impl(cls, instance: "_ClangBasedTargetInfo", *,
-                                                 xtarget: "CrossCompileTarget", softfloat: bool = None,
+                                                 xtarget: "CrossCompileTarget", softfloat: Optional[bool] = None,
                                                  perform_sanity_checks=True, default_flags_only=False):
         assert xtarget is not None
         if softfloat is None:
@@ -217,16 +244,6 @@ class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
             pass  # No additional flags needed for x86_64.
         else:
             project.warning("Compiler flags might be wong, only native + MIPS checked so far")
-
-        # This needs to be checked last since we depend on the --target/-mabi flags for the -fsanitize= check.
-        if config.use_cheri_ubsan and xtarget.is_hybrid_or_purecap_cheri():
-            compiler = project.get_compiler_info(instance.c_compiler)
-            if compiler.supports_sanitizer_flag("-fsanitize=cheri", result):
-                result.append("-fsanitize=cheri")
-                if not config.use_cheri_ubsan_runtime:
-                    result.append("-fsanitize-trap=cheri")
-            else:
-                project.warning("Compiler", compiler.path, "does not support -fsanitize=cheri, please update your SDK")
         return result
 
     @classmethod
@@ -345,11 +362,11 @@ class FreeBSDTargetInfo(_ClangBasedTargetInfo):
         return mapping[self.target.cpu_architecture]
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         return ["freebsd"]
 
     @property
-    def pkgconfig_dirs(self) -> "typing.List[str]":
+    def pkgconfig_dirs(self) -> "list[str]":
         assert self.project.needs_sysroot, "Should not call this for projects that build without a sysroot"
         # FreeBSD uses /usr/libdata/pkgconfig for the native ABI.
         return [str(self.sysroot_dir / "usr/libdata/pkgconfig"),
@@ -385,7 +402,7 @@ class FreeBSDTargetInfo(_ClangBasedTargetInfo):
         return Path("usr/local")
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildUpstreamLLVM
         return BuildUpstreamLLVM
 
@@ -396,7 +413,7 @@ class FreeBSDTargetInfo(_ClangBasedTargetInfo):
     def _get_mfs_root_kernel(self, platform, use_benchmark_kernel: bool) -> Path:
         raise NotImplementedError("Only implemented for CheriBSD")
 
-    def _get_run_project(self) -> "typing.Type[AbstractLaunchFreeBSD]":
+    def _get_run_project(self) -> "type[AbstractLaunchFreeBSD]":
         from ..projects.run_qemu import LaunchFreeBSD
         return LaunchFreeBSD
 
@@ -419,8 +436,8 @@ class FreeBSDTargetInfo(_ClangBasedTargetInfo):
         rootfs_xtarget = xtarget.get_rootfs_target()
         from ..qemu_utils import QemuOptions
         qemu_options = QemuOptions(rootfs_xtarget)
-        run_instance = self._get_run_project().get_instance(self.project,
-                                                            cross_target=rootfs_xtarget)  # type: AbstractLaunchFreeBSD
+        run_instance: AbstractLaunchFreeBSD = self._get_run_project().get_instance(self.project,
+                                                                                   cross_target=rootfs_xtarget)
         if rootfs_xtarget.cpu_architecture not in (CPUArchitecture.MIPS64, CPUArchitecture.RISCV64,
                                                    CPUArchitecture.X86_64, CPUArchitecture.AARCH64):
             self.project.warning("CheriBSD test scripts currently only work for MIPS, RISC-V, AArch64, and x86-64")
@@ -509,7 +526,7 @@ class FreeBSDTargetInfo(_ClangBasedTargetInfo):
         if self.config.test_ld_preload:
             cmd.append("--test-ld-preload=" + str(self.config.test_ld_preload))
             if xtarget.is_cheri_purecap() and not rootfs_xtarget.is_cheri_purecap():
-                cmd.append("--test-ld-preload-variable=LD_CHERI_PRELOAD")
+                cmd.append("--test-ld-preload-variable=LD_64C_PRELOAD")
             elif not xtarget.is_cheri_purecap() and rootfs_xtarget.is_cheri_purecap():
                 cmd.append("--test-ld-preload-variable=LD_64_PRELOAD")
             else:
@@ -529,11 +546,11 @@ class CheriBSDTargetInfo(FreeBSDTargetInfo):
     FREEBSD_VERSION: int = 13
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildCheriLLVM
         return BuildCheriLLVM
 
-    def _get_run_project(self) -> "typing.Type[AbstractLaunchFreeBSD]":
+    def _get_run_project(self) -> "type[AbstractLaunchFreeBSD]":
         from ..projects.run_qemu import LaunchCheriBSD
         return LaunchCheriBSD
 
@@ -565,7 +582,7 @@ class CheriBSDTargetInfo(FreeBSDTargetInfo):
         return base + purecap_suffix
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         return ["cheribsd"]  # Pick the matching sysroot (-purecap for purecap, -hybrid for hybrid etc.)
 
     @property
@@ -582,7 +599,7 @@ class CheriBSDTargetInfo(FreeBSDTargetInfo):
         return result
 
     @property
-    def pkgconfig_dirs(self) -> "typing.List[str]":
+    def pkgconfig_dirs(self) -> "list[str]":
         assert self.project.needs_sysroot, "Should not call this for projects that build without a sysroot"
         # For CheriBSD we install most packages to /usr/local/<arch>/, but some packages installed by pkg
         # need to be in the default search path under /usr/local or /usr/local64.
@@ -600,7 +617,7 @@ class CheriBSDTargetInfo(FreeBSDTargetInfo):
         from ..projects.cross.cheribsd import BuildCHERIBSD
         return BuildCHERIBSD.get_class_for_target(xtarget)
 
-    def cheribsd_version(self) -> "typing.Optional[int]":
+    def cheribsd_version(self) -> "Optional[int]":
         pattern = re.compile(r"#define\s+__CheriBSD_version\s+([0-9]+)")
         try:
             with open(self.sysroot_dir / "usr/include/sys/param.h") as f:
@@ -618,7 +635,7 @@ class CheriBSDMorelloTargetInfo(CheriBSDTargetInfo):
     uses_morello_llvm: bool = True
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildMorelloLLVM
         return BuildMorelloLLVM
 
@@ -648,10 +665,9 @@ class CheriBSDMorelloTargetInfo(CheriBSDTargetInfo):
         if version is None or version >= 20220511:
             # Use new var-args ABI
             result.extend(["-Xclang", "-morello-vararg=new"])
-        if xtarget.is_cheri_purecap([CPUArchitecture.AARCH64]):
-            if version is not None and version < 20220511:
-                # Use emulated TLS on older purecap
-                result.append("-femulated-tls")
+        if xtarget.is_cheri_purecap([CPUArchitecture.AARCH64]) and version is not None and version < 20220511:
+            # Use emulated TLS on older purecap
+            result.append("-femulated-tls")
         return result
 
 
@@ -667,7 +683,7 @@ class CheriOSTargetInfo(CheriBSDTargetInfo):
         return self._get_compiler_project().get_native_install_path(self.config)
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildCheriOSLLVM
         return BuildCheriOSLLVM
 
@@ -688,12 +704,12 @@ class CheriOSTargetInfo(CheriBSDTargetInfo):
         return True
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         # Otherwise pick the matching sysroot
         return ["cherios"]
 
     @property
-    def pkgconfig_dirs(self) -> "typing.List[str]":
+    def pkgconfig_dirs(self) -> "list[str]":
         return []
 
 
@@ -725,10 +741,14 @@ class RTEMSTargetInfo(_ClangBasedTargetInfo):
     def sysroot_dir(self):
         # Install to target triple as RTEMS' LLVM/Clang Driver expects
         return self.config.sysroot_output_root / self.config.default_cheri_sdk_directory_name / (
-                "sysroot-" + self.target.get_rootfs_target().generic_arch_suffix) / self.target_triple
+                "sysroot-" + self.target.get_rootfs_target().generic_arch_suffix)
+
+    @property
+    def sysroot_install_prefix_relative(self) -> Path:
+        return Path(self.target_triple)
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildCheriLLVM
         return BuildCheriLLVM
 
@@ -737,7 +757,7 @@ class RTEMSTargetInfo(_ClangBasedTargetInfo):
         return True  # only static linking works
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         if target.is_riscv(include_purecap=True):
             return ["newlib", "compiler-rt-builtins", "rtems"]
         else:
@@ -769,7 +789,11 @@ class BaremetalClangTargetInfo(_ClangBasedTargetInfo, metaclass=ABCMeta):
 
 class NewlibBaremetalTargetInfo(BaremetalClangTargetInfo):
     shortname = "Newlib"
-    os_prefix = "baremetal-"
+    os_prefix = "baremetal-newlib-"
+
+    @property
+    def sysroot_install_prefix_relative(self) -> Path:
+        return Path(self.target_triple)
 
     @property
     def sysroot_dir(self) -> Path:
@@ -779,10 +803,10 @@ class NewlibBaremetalTargetInfo(BaremetalClangTargetInfo):
         else:
             suffix = self.target.get_rootfs_target().generic_arch_suffix
         sysroot_dir = self.config.sysroot_output_root / self.config.default_cheri_sdk_directory_name
-        return sysroot_dir / "baremetal" / suffix / self.target_triple
+        return sysroot_dir / "baremetal" / suffix
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildCheriLLVM
         return BuildCheriLLVM
 
@@ -790,17 +814,17 @@ class NewlibBaremetalTargetInfo(BaremetalClangTargetInfo):
     def triple_for_target(cls, target, config, include_version: bool) -> str:
         if target.is_mips(include_purecap=True):
             if target.is_cheri_purecap():
-                return "mips64c{}-qemu-elf-purecap".format(config.mips_cheri_bits)
+                return f"mips64c{config.mips_cheri_bits}-qemu-elf-purecap"
             return "mips64-qemu-elf"
         if target.is_riscv(include_purecap=True):
             return target.cpu_architecture.value + "-unknown-elf"
         assert False, "Other baremetal cases have not been tested yet!"
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         return ["newlib", "compiler-rt-builtins"]
 
-    def default_initial_compile_flags(self) -> typing.List[str]:
+    def default_initial_compile_flags(self) -> "list[str]":
         # Currently we need these flags to build anything against newlib baremetal
         if self.target.is_mips(include_purecap=True):
             return [
@@ -836,8 +860,8 @@ class PicolibcBaremetalTargetInfo(BaremetalClangTargetInfo):
     @classmethod
     def essential_compiler_and_linker_flags_impl(cls, *args, xtarget, **kwargs) -> "list[str]":
         # We are linking baremetal binaries -> always use local-exec TLS
-        return super().essential_compiler_and_linker_flags_impl(*args, xtarget=xtarget, **kwargs) + [
-            "-ftls-model=local-exec"]
+        return [*super().essential_compiler_and_linker_flags_impl(*args, xtarget=xtarget, **kwargs),
+                "-ftls-model=local-exec"]
 
     @property
     def sysroot_dir(self) -> Path:
@@ -845,9 +869,9 @@ class PicolibcBaremetalTargetInfo(BaremetalClangTargetInfo):
         return sysroot_dir / "picolibc" / self.target.get_rootfs_target().generic_arch_suffix
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
-        from ..projects.cross.llvm import BuildUpstreamLLVM
-        return BuildUpstreamLLVM
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
+        from ..projects.cross.llvm import BuildCheriLLVM
+        return BuildCheriLLVM
 
     def semihosting_ldflags(self):
         stack_size = "4k"
@@ -871,7 +895,7 @@ class PicolibcBaremetalTargetInfo(BaremetalClangTargetInfo):
         assert False, "Other baremetal cases have not been tested yet!"
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         return ["picolibc"]
 
     @property
@@ -883,13 +907,36 @@ class PicolibcBaremetalTargetInfo(BaremetalClangTargetInfo):
         return BuildPicoLibc.get_instance(self.project, cross_target=xtarget)
 
 
-class MorelloBaremetalTargetInfo(BaremetalClangTargetInfo):
+class BaremetalFreestandingTargetInfo(BaremetalClangTargetInfo):
+    shortname: str = "Baremetal"
+    os_prefix: str = "baremetal-"
+
+    @classmethod
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
+        from ..projects.cross.llvm import BuildCheriLLVM
+        return BuildCheriLLVM
+
+    @classmethod
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
+        return []
+
+    @classmethod
+    def triple_for_target(cls, target: "CrossCompileTarget", config: "CheriConfig", *, include_version: bool) -> str:
+        return target.cpu_architecture.value + "-unknown-elf"
+
+    @property
+    def sysroot_dir(self) -> Path:
+        sysroot_dir = self.config.sysroot_output_root / self.config.default_cheri_sdk_directory_name
+        return sysroot_dir / "baremetal" / self.target.get_rootfs_target().generic_arch_suffix
+
+
+class MorelloBaremetalTargetInfo(BaremetalFreestandingTargetInfo):
     shortname: str = "Morello-Baremetal"
     os_prefix: str = "baremetal-"
     uses_morello_llvm: bool = True
 
     @classmethod
-    def _get_compiler_project(cls) -> "typing.Type[BuildLLVMMonoRepoBase]":
+    def _get_compiler_project(cls) -> "type[BuildLLVMMonoRepoBase]":
         from ..projects.cross.llvm import BuildMorelloLLVM
         return BuildMorelloLLVM
 
@@ -908,11 +955,7 @@ class MorelloBaremetalTargetInfo(BaremetalClangTargetInfo):
         assert False, "Other baremetal cases have not been tested yet!"
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
-        return []
-
-    @classmethod
-    def essential_compiler_and_linker_flags_impl(cls, *args, xtarget, **kwargs) -> typing.List[str]:
+    def essential_compiler_and_linker_flags_impl(cls, *args, xtarget, **kwargs) -> "list[str]":
         if xtarget.cpu_architecture == CPUArchitecture.ARM32 or xtarget.is_aarch64(include_purecap=True):
             return super().essential_compiler_and_linker_flags_impl(*args, xtarget=xtarget, **kwargs)
         raise ValueError("Other baremetal cases have not been tested yet!")
@@ -920,7 +963,7 @@ class MorelloBaremetalTargetInfo(BaremetalClangTargetInfo):
 
 class ArmNoneEabiGccTargetInfo(TargetInfo):
     @classmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> typing.List[str]:
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: "CheriConfig") -> "list[str]":
         return []  # TODO: add a target to download the tarball and extract it
 
     def get_target_triple(self, *, include_version: bool) -> str:
@@ -1090,23 +1133,62 @@ class CompilationTargets(BasicCompilationTargets):
     BAREMETAL_NEWLIB_RISCV64_PURECAP = CrossCompileTarget("riscv64-purecap", CPUArchitecture.RISCV64,
                                                           NewlibBaremetalTargetInfo, is_cheri_purecap=True,
                                                           hybrid_target=BAREMETAL_NEWLIB_RISCV64_HYBRID)
-
-    MORELLO_BAREMETAL_NO_CHERI = CrossCompileTarget("morello-aarch64", CPUArchitecture.AARCH64,
-                                                    MorelloBaremetalTargetInfo, is_cheri_hybrid=False,
-                                                    is_cheri_purecap=False)
-    MORELLO_BAREMETAL_HYBRID = CrossCompileTarget("morello-hybrid", CPUArchitecture.AARCH64,
-                                                  MorelloBaremetalTargetInfo, is_cheri_hybrid=True,
-                                                  is_cheri_purecap=False)
-    MORELLO_BAREMETAL_PURECAP = CrossCompileTarget("morello-purecap", CPUArchitecture.AARCH64,
-                                                   MorelloBaremetalTargetInfo, is_cheri_hybrid=False,
-                                                   is_cheri_purecap=True)
+    ALL_NEWLIB_TARGETS = (
+        BAREMETAL_NEWLIB_MIPS64,
+        BAREMETAL_NEWLIB_MIPS64_PURECAP,
+        BAREMETAL_NEWLIB_RISCV32,
+        BAREMETAL_NEWLIB_RISCV32_HYBRID,
+        BAREMETAL_NEWLIB_RISCV32_PURECAP,
+        BAREMETAL_NEWLIB_RISCV64,
+        BAREMETAL_NEWLIB_RISCV64_HYBRID,
+        BAREMETAL_NEWLIB_RISCV64_PURECAP,
+    )
+    FREESTANDING_MIPS64 = CrossCompileTarget("mips64", CPUArchitecture.MIPS64, BaremetalFreestandingTargetInfo)
+    FREESTANDING_MORELLO_NO_CHERI = CrossCompileTarget("morello-aarch64", CPUArchitecture.AARCH64,
+                                                       MorelloBaremetalTargetInfo, is_cheri_hybrid=False,
+                                                       is_cheri_purecap=False)
+    FREESTANDING_MORELLO_HYBRID = CrossCompileTarget("morello-hybrid", CPUArchitecture.AARCH64,
+                                                     MorelloBaremetalTargetInfo, is_cheri_hybrid=True,
+                                                     is_cheri_purecap=False)
+    FREESTANDING_MORELLO_PURECAP = CrossCompileTarget("morello-purecap", CPUArchitecture.AARCH64,
+                                                      MorelloBaremetalTargetInfo, is_cheri_hybrid=False,
+                                                      is_cheri_purecap=True)
+    FREESTANDING_RISCV32 = CrossCompileTarget("riscv32", CPUArchitecture.RISCV32, BaremetalFreestandingTargetInfo)
+    FREESTANDING_RISCV32_HYBRID = CrossCompileTarget("riscv32-hybrid", CPUArchitecture.RISCV32,
+                                                     BaremetalFreestandingTargetInfo, is_cheri_hybrid=True,
+                                                     non_cheri_target=FREESTANDING_RISCV32)
+    FREESTANDING_RISCV32_PURECAP = CrossCompileTarget("riscv32-purecap", CPUArchitecture.RISCV32,
+                                                      BaremetalFreestandingTargetInfo, is_cheri_purecap=True,
+                                                      hybrid_target=FREESTANDING_RISCV32_HYBRID)
+    FREESTANDING_RISCV64 = CrossCompileTarget("riscv64", CPUArchitecture.RISCV64, BaremetalFreestandingTargetInfo)
+    FREESTANDING_RISCV64_HYBRID = CrossCompileTarget("riscv64-hybrid", CPUArchitecture.RISCV64,
+                                                     BaremetalFreestandingTargetInfo, is_cheri_hybrid=True,
+                                                     non_cheri_target=FREESTANDING_RISCV64)
+    FREESTANDING_RISCV64_PURECAP = CrossCompileTarget("riscv64-purecap", CPUArchitecture.RISCV64,
+                                                      BaremetalFreestandingTargetInfo, is_cheri_purecap=True,
+                                                      hybrid_target=FREESTANDING_RISCV64_HYBRID)
+    ALL_FREESTANDING_TARGETS = (
+        FREESTANDING_MIPS64,
+        FREESTANDING_MORELLO_NO_CHERI,
+        FREESTANDING_MORELLO_HYBRID,
+        FREESTANDING_MORELLO_PURECAP,
+        FREESTANDING_RISCV32,
+        FREESTANDING_RISCV32_HYBRID,
+        FREESTANDING_RISCV32_PURECAP,
+        FREESTANDING_RISCV64,
+        FREESTANDING_RISCV64_HYBRID,
+        FREESTANDING_RISCV64_PURECAP,
+    )
     ARM_NONE_EABI = CrossCompileTarget("arm-none-eabi", CPUArchitecture.ARM32, ArmNoneEabiGccTargetInfo,
                                        is_cheri_hybrid=False, is_cheri_purecap=False)  # For 32-bit firmrware
 
     # Picolibc targets
     BAREMETAL_PICOLIBC_RISCV32 = CrossCompileTarget("riscv32", CPUArchitecture.RISCV32, PicolibcBaremetalTargetInfo)
     BAREMETAL_PICOLIBC_RISCV64 = CrossCompileTarget("riscv64", CPUArchitecture.RISCV64, PicolibcBaremetalTargetInfo)
-    ALL_PICOLIBC_TARGETS = [BAREMETAL_PICOLIBC_RISCV32, BAREMETAL_PICOLIBC_RISCV64]
+    BAREMETAL_PICOLIBC_RISCV64_PURECAP = CrossCompileTarget("riscv64-purecap", CPUArchitecture.RISCV64,
+                                                            PicolibcBaremetalTargetInfo, is_cheri_purecap=True,
+                                                            non_cheri_target=BAREMETAL_PICOLIBC_RISCV64)
+    ALL_PICOLIBC_TARGETS = (BAREMETAL_PICOLIBC_RISCV32, BAREMETAL_PICOLIBC_RISCV64, BAREMETAL_PICOLIBC_RISCV64_PURECAP)
 
     # FreeBSD targets
     FREEBSD_AARCH64 = CrossCompileTarget("aarch64", CPUArchitecture.AARCH64, FreeBSDTargetInfo)
@@ -1114,54 +1196,44 @@ class CompilationTargets(BasicCompilationTargets):
     FREEBSD_I386 = CrossCompileTarget("i386", CPUArchitecture.I386, FreeBSDTargetInfo)
     FREEBSD_MIPS64 = CrossCompileTarget("mips64", CPUArchitecture.MIPS64, FreeBSDTargetInfo)
     FREEBSD_RISCV64 = CrossCompileTarget("riscv64", CPUArchitecture.RISCV64, FreeBSDTargetInfo)
-    ALL_SUPPORTED_FREEBSD_TARGETS = [FREEBSD_AARCH64, FREEBSD_AMD64, FREEBSD_I386, FREEBSD_RISCV64]
+    ALL_SUPPORTED_FREEBSD_TARGETS = (FREEBSD_AARCH64, FREEBSD_AMD64, FREEBSD_I386, FREEBSD_RISCV64)
 
     # RTEMS targets
     RTEMS_RISCV64 = CrossCompileTarget("riscv64", CPUArchitecture.RISCV64, RTEMSTargetInfo)
     RTEMS_RISCV64_PURECAP = CrossCompileTarget("riscv64-purecap", CPUArchitecture.RISCV64, RTEMSTargetInfo,
                                                is_cheri_purecap=True, non_cheri_target=RTEMS_RISCV64)
 
-    ALL_CHERIBSD_RISCV_TARGETS = [CHERIBSD_RISCV_PURECAP, CHERIBSD_RISCV_HYBRID, CHERIBSD_RISCV_NO_CHERI]
-    ALL_CHERIBSD_NON_MORELLO_TARGETS = ALL_CHERIBSD_RISCV_TARGETS + [CHERIBSD_AARCH64, CHERIBSD_X86_64]
-    ALL_CHERIBSD_MORELLO_TARGETS = [CHERIBSD_MORELLO_PURECAP, CHERIBSD_MORELLO_HYBRID]
-    ALL_CHERIBSD_HYBRID_TARGETS = [CHERIBSD_RISCV_HYBRID, CHERIBSD_MORELLO_HYBRID]
-    ALL_CHERIBSD_PURECAP_TARGETS = [CHERIBSD_RISCV_PURECAP, CHERIBSD_MORELLO_PURECAP]
+    ALL_CHERIBSD_RISCV_TARGETS = (CHERIBSD_RISCV_PURECAP, CHERIBSD_RISCV_HYBRID, CHERIBSD_RISCV_NO_CHERI)
+    ALL_CHERIBSD_NON_MORELLO_TARGETS = (*ALL_CHERIBSD_RISCV_TARGETS, CHERIBSD_AARCH64, CHERIBSD_X86_64)
+    ALL_CHERIBSD_MORELLO_TARGETS = (CHERIBSD_MORELLO_PURECAP, CHERIBSD_MORELLO_HYBRID)
+    ALL_CHERIBSD_HYBRID_TARGETS = (CHERIBSD_RISCV_HYBRID, CHERIBSD_MORELLO_HYBRID)
+    ALL_CHERIBSD_PURECAP_TARGETS = (CHERIBSD_RISCV_PURECAP, CHERIBSD_MORELLO_PURECAP)
     ALL_CHERIBSD_TARGETS_WITH_HYBRID = ALL_CHERIBSD_NON_MORELLO_TARGETS + ALL_CHERIBSD_MORELLO_TARGETS
-    ALL_CHERIBSD_NON_CHERI_TARGETS = [CHERIBSD_RISCV_NO_CHERI, CHERIBSD_AARCH64,
-                                      CHERIBSD_X86_64]  # does not include i386
-    ALL_CHERIBSD_CHERI_TARGETS_WITH_HYBRID = list(
+    ALL_CHERIBSD_NON_CHERI_TARGETS = (CHERIBSD_RISCV_NO_CHERI, CHERIBSD_AARCH64,
+                                      CHERIBSD_X86_64)  # does not include i386
+    ALL_CHERIBSD_CHERI_TARGETS_WITH_HYBRID = tuple(
                 set(ALL_CHERIBSD_TARGETS_WITH_HYBRID) - set(ALL_CHERIBSD_NON_CHERI_TARGETS))
 
-    # Special targets for specific uses only, not part of any of the above
-    ALL_CHERIBSD_NON_CHERI_FOR_HYBRID_ROOTFS_TARGETS = [CHERIBSD_MORELLO_NO_CHERI_FOR_HYBRID_ROOTFS,
-                                                        CHERIBSD_RISCV_NO_CHERI_FOR_HYBRID_ROOTFS]
-    ALL_CHERIBSD_NON_CHERI_FOR_PURECAP_ROOTFS_TARGETS = [CHERIBSD_MORELLO_NO_CHERI_FOR_PURECAP_ROOTFS,
-                                                         CHERIBSD_RISCV_NO_CHERI_FOR_PURECAP_ROOTFS]
-    ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS = [CHERIBSD_MORELLO_HYBRID_FOR_PURECAP_ROOTFS,
-                                                      CHERIBSD_RISCV_HYBRID_FOR_PURECAP_ROOTFS]
-    ALL_CHERIBSD_PURECAP_FOR_HYBRID_ROOTFS_TARGETS = [CHERIBSD_MORELLO_PURECAP_FOR_HYBRID_ROOTFS,
-                                                      CHERIBSD_RISCV_PURECAP_FOR_HYBRID_ROOTFS]
+    # Special targets for specific uses only, not part of the above
+    ALL_CHERIBSD_NON_CHERI_FOR_HYBRID_ROOTFS_TARGETS = (CHERIBSD_MORELLO_NO_CHERI_FOR_HYBRID_ROOTFS,
+                                                        CHERIBSD_RISCV_NO_CHERI_FOR_HYBRID_ROOTFS)
+    ALL_CHERIBSD_NON_CHERI_FOR_PURECAP_ROOTFS_TARGETS = (CHERIBSD_MORELLO_NO_CHERI_FOR_PURECAP_ROOTFS,
+                                                         CHERIBSD_RISCV_NO_CHERI_FOR_PURECAP_ROOTFS)
+    ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS = (CHERIBSD_MORELLO_HYBRID_FOR_PURECAP_ROOTFS,
+                                                      CHERIBSD_RISCV_HYBRID_FOR_PURECAP_ROOTFS)
+    ALL_CHERIBSD_PURECAP_FOR_HYBRID_ROOTFS_TARGETS = (CHERIBSD_MORELLO_PURECAP_FOR_HYBRID_ROOTFS,
+                                                      CHERIBSD_RISCV_PURECAP_FOR_HYBRID_ROOTFS)
 
     ALL_SUPPORTED_CHERIBSD_TARGETS = ALL_CHERIBSD_NON_CHERI_TARGETS + ALL_CHERIBSD_PURECAP_TARGETS
     ALL_CHERIBSD_TARGETS_WITH_HYBRID_FOR_PURECAP_ROOTFS = (ALL_SUPPORTED_CHERIBSD_TARGETS +
                                                            ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS)
     if enable_hybrid_for_purecap_rootfs_targets():
-        ALL_SUPPORTED_CHERIBSD_TARGETS.extend(ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS)
-    ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS = ALL_SUPPORTED_CHERIBSD_TARGETS + [BasicCompilationTargets.NATIVE]
+        ALL_SUPPORTED_CHERIBSD_TARGETS += ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS
+    ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS = ALL_SUPPORTED_CHERIBSD_TARGETS + BasicCompilationTargets.ALL_NATIVE
     ALL_FREEBSD_AND_CHERIBSD_TARGETS = ALL_SUPPORTED_CHERIBSD_TARGETS + ALL_SUPPORTED_FREEBSD_TARGETS
 
-    ALL_SUPPORTED_BAREMETAL_TARGETS = [BAREMETAL_NEWLIB_MIPS64,
-                                       BAREMETAL_NEWLIB_MIPS64_PURECAP,
-                                       BAREMETAL_NEWLIB_RISCV32,
-                                       BAREMETAL_NEWLIB_RISCV32_HYBRID,
-                                       BAREMETAL_NEWLIB_RISCV32_PURECAP,
-                                       BAREMETAL_NEWLIB_RISCV64,
-                                       BAREMETAL_NEWLIB_RISCV64_HYBRID,
-                                       BAREMETAL_NEWLIB_RISCV64_PURECAP,
-                                       MORELLO_BAREMETAL_NO_CHERI,
-                                       MORELLO_BAREMETAL_HYBRID,
-                                       MORELLO_BAREMETAL_PURECAP] + ALL_PICOLIBC_TARGETS
-    ALL_SUPPORTED_RTEMS_TARGETS = [RTEMS_RISCV64, RTEMS_RISCV64_PURECAP]
+    ALL_SUPPORTED_BAREMETAL_TARGETS = ALL_NEWLIB_TARGETS + ALL_PICOLIBC_TARGETS
+    ALL_SUPPORTED_RTEMS_TARGETS = (RTEMS_RISCV64, RTEMS_RISCV64_PURECAP)
     ALL_SUPPORTED_CHERIBSD_AND_BAREMETAL_AND_HOST_TARGETS = \
         ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS + ALL_SUPPORTED_BAREMETAL_TARGETS
 

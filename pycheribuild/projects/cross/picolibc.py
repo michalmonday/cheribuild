@@ -26,33 +26,45 @@
 import os
 
 from .crosscompileproject import CrossCompileMesonProject, GitRepository
-from ..build_qemu import BuildUpstreamQEMU
+from ..build_qemu import BuildQEMU
+from ..project import DefaultInstallDir
 from ...config.compilation_targets import CompilationTargets
-from ...processutils import set_env
 
 
 class BuildPicoLibc(CrossCompileMesonProject):
     target = "picolibc"
-    repository = GitRepository("https://github.com/picolibc/picolibc.git",
-                               temporary_url_override="https://github.com/arichardson/picolibc.git",
-                               url_override_reason="https://github.com/picolibc/picolibc/pull/376")
-    supported_architectures = [CompilationTargets.NATIVE] + CompilationTargets.ALL_PICOLIBC_TARGETS
+    repository = GitRepository("https://github.com/picolibc/picolibc.git")
+    supported_architectures = CompilationTargets.ALL_NATIVE + CompilationTargets.ALL_PICOLIBC_TARGETS
+    # Installing the native headers and libraries to <output>/local breaks other native project builds.
+    native_install_dir = DefaultInstallDir.DO_NOT_INSTALL
     needs_sysroot = False
     include_os_in_target_suffix = False  # Avoid adding -picolibc- as we are building picolibc here
     # ld.lld: error: -r and --gdb-index may not be used together
     add_gdb_index = False
 
     @classmethod
-    def dependencies(cls, config) -> "list[str]":
+    def dependencies(cls, config) -> "tuple[str, ...]":
         if cls._xtarget and cls._xtarget.is_native():
-            return []
-        return ["upstream-compiler-rt-builtins"]
+            return tuple()
+        return ("compiler-rt-builtins",)
 
     @property
     def _meson_extra_binaries(self):
         if not self.compiling_for_host():
             assert self.compiling_for_riscv(include_purecap=True), "Only tested riscv so far"
             return "exe_wrapper = ['sh', '-c', 'test -z \"$PICOLIBC_TEST\" || run-riscv \"$@\"', 'run-riscv']"
+        return ""
+
+    @property
+    def _meson_extra_properties(self):
+        if not self.compiling_for_host():
+            assert self.compiling_for_riscv(include_purecap=True), "Only tested riscv so far"
+            return """
+default_flash_addr = '0x80000000'
+default_flash_size = '0x00200000'
+default_ram_addr   = '0x80200000'
+default_ram_size   = '0x00200000'
+"""
         return ""
 
     def setup(self):
@@ -81,7 +93,7 @@ class BuildPicoLibc(CrossCompileMesonProject):
             # codegen isn't referencing the GOT, so until https://reviews.llvm.org/D107280 lands, we have to use -fpie
             # See also https://github.com/ClangBuiltLinux/linux/issues/1409 and
             # https://github.com/riscv-non-isa/riscv-elf-psabi-doc/pull/201
-            return super().default_compiler_flags + ["-fpie"]
+            return [*super().default_compiler_flags, "-fpie"]
         return super().default_compiler_flags
 
     @property
@@ -110,8 +122,8 @@ class BuildPicoLibc(CrossCompileMesonProject):
 
     def run_tests(self):
         if not self.compiling_for_host():
-            qemu = BuildUpstreamQEMU.qemu_binary_for_target(self.crosscompile_target, self.config)
-            with set_env(PATH=str(qemu.parent) + ":" + os.getenv("PATH", ""), print_verbose_only=False):
+            qemu = BuildQEMU.qemu_binary_for_target(self.crosscompile_target, self.config)
+            with self.set_env(PATH=str(qemu.parent) + ":" + os.getenv("PATH", ""), print_verbose_only=False):
                 self.run_cmd(self.configure_command, "test", "--print-errorlogs", cwd=self.build_dir)
         else:
             super().run_tests()

@@ -33,14 +33,18 @@ from pathlib import Path
 from typing import ClassVar, Iterable
 
 from ..cmake_project import CMakeProject
-from ..project import BuildType, DefaultInstallDir, GitRepository, ComputedDefaultValue
+from ..project import BuildType, ComputedDefaultValue, DefaultInstallDir, GitRepository
 from ..simple_project import SimpleProject
 from ...config.chericonfig import CheriConfig
-from ...config.compilation_targets import (CheriBSDMorelloTargetInfo, CheriBSDTargetInfo, CompilationTargets,
-                                           FreeBSDTargetInfo)
-from ...config.target_info import CompilerType, CrossCompileTarget, AbstractProject
+from ...config.compilation_targets import (
+    CheriBSDMorelloTargetInfo,
+    CheriBSDTargetInfo,
+    CompilationTargets,
+    FreeBSDTargetInfo,
+)
+from ...config.target_info import AbstractProject, CompilerType, CrossCompileTarget
 from ...processutils import CompilerInfo
-from ...utils import is_jenkins_build, OSInfo, ThreadJoiner, remove_duplicates, InstallInstructions
+from ...utils import InstallInstructions, OSInfo, ThreadJoiner, is_jenkins_build, remove_tuple_duplicates
 
 _true_unless_build_all_set = ComputedDefaultValue(function=lambda config, project: not project.build_everything,
                                                   as_string="True unless build-everything is set")
@@ -58,6 +62,9 @@ class BuildLLVMBase(CMakeProject):
     is_large_source_repository = True
     # Linking all the debug info takes forever
     default_build_type = BuildType.RELEASE
+    # LLVM does not yet compile for purecap.
+    supported_architectures = (CompilationTargets.NATIVE_NON_PURECAP,)
+    default_architecture = CompilationTargets.NATIVE_NON_PURECAP
 
     included_projects: "ClassVar[list[str]]"
     add_default_sysroot: "ClassVar[bool]"
@@ -71,6 +78,13 @@ class BuildLLVMBase(CMakeProject):
     install_toolchain_only: "ClassVar[bool]"
     build_minimal_toolchain: "ClassVar[bool]"
 
+    @staticmethod
+    def custom_target_name(base_target: str, xtarget: CrossCompileTarget) -> str:
+        if xtarget is CompilationTargets.NATIVE_NON_PURECAP and xtarget != CompilationTargets.NATIVE:
+            assert xtarget.generic_target_suffix == "native-hybrid", xtarget.generic_target_suffix
+            return base_target + "-native"
+        return base_target + "-" + xtarget.generic_target_suffix
+
     @classmethod
     def is_toolchain_target(cls):
         return True
@@ -83,9 +97,8 @@ class BuildLLVMBase(CMakeProject):
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
         if "included_projects" not in cls.__dict__:
-            cls.included_projects = cls.add_config_option("include-projects", default=["llvm", "clang", "lld"],
-                                                          kind=list,
-                                                          help="List of LLVM subprojects that should be built")
+            cls.included_projects = cls.add_list_option("include-projects", default=["llvm", "clang", "lld"],
+                                                        help="List of LLVM subprojects that should be built")
         cls.add_default_sysroot = False
         cls.enable_assertions = cls.add_bool_option("assertions", help="build with assertions enabled", default=True)
         if "skip_static_analyzer" not in cls.__dict__:
@@ -248,7 +261,13 @@ class BuildLLVMBase(CMakeProject):
     def add_lto_build_options(self, ccinfo: CompilerInfo) -> bool:
         if not super().add_lto_build_options(ccinfo):
             return False  # can't use LTO
-        if self.can_use_lld(self.CC) and not self.prefer_full_lto_over_thin_lto:
+        # Use the LLVM build system support for LTO instead of trying to modify CFLAGS/LDFLAGS. The build system
+        # includes logic to avoid building binaries such as unit tests with LTO to reduce build times and explicitly
+        # adding the compilation flags means that those binaries will actually be built with LTO, massively increasing
+        # the build times.
+        self._lto_compiler_flags.clear()
+        self._lto_linker_flags.clear()
+        if self.can_use_thinlto(ccinfo) and not self.prefer_full_lto_over_thin_lto:
             self.add_cmake_options(LLVM_ENABLE_LTO="Thin")
         else:
             self.add_cmake_options(LLVM_ENABLE_LTO=True)
@@ -379,16 +398,17 @@ exec {lld} "$@"
         self.run_cmd("du", "-sh", self.install_dir)
         # We don't use libclang.so or the other llvm libraries:
         # Note: this is a non-recursive search since we *do* need the files in lib/clang/<version>/
-        if (self.install_dir / "lib").is_dir():
+        if self.install_toolchain_only and (self.install_dir / "lib").is_dir():
             for f in (self.install_dir / "lib").iterdir():
                 if f.is_dir():
                     continue
-                if any(f.name.startswith(prefix) for prefix in ("libclang", "libRemarks", "libLTO")):
+                if f.name.startswith(("libclang", "libRemarks", "libLTO", "libLLVM", "liblld")):
                     self.delete_file(f, warn_if_missing=True)
                     continue
                 self.warning("Found an unexpected file in libdir. Was this installed by another project?", f)
-        # We also don't need the C API headers since we deleted the libraries
-        self.clean_directory(self.install_dir / "include/", ensure_dir_exists=False)
+        if self.install_toolchain_only:
+            # We also don't need the C API headers if we deleted the libraries
+            self.clean_directory(self.install_dir / "include/", ensure_dir_exists=False)
         # Each of these executables are 30-40MB and we don't use them anywhere:
         # 31685928	/local/scratch/alr48/jenkins-test/tarball/opt/llvm-native/bin/clang-scan-deps
         # 32103560	/local/scratch/alr48/jenkins-test/tarball/opt/llvm-native/bin/clang-rename
@@ -437,6 +457,18 @@ class BuildLLVMMonoRepoBase(BuildLLVMBase):
         for i in ("clang", "clang++", "clang-cpp"):
             self.create_symlink(self.install_dir / "bin" / i, self.install_dir / "utils" / (prefix + "-" + i))
 
+    def add_compilers_with_config_files(self, prefix: str, rootfs_target: CrossCompileTarget):
+        targets = [rootfs_target]
+        if rootfs_target.is_cheri_hybrid():
+            targets.append(rootfs_target.get_non_cheri_for_hybrid_rootfs_target())
+            targets.append(rootfs_target.get_cheri_purecap_for_hybrid_rootfs_target())
+        elif rootfs_target.is_cheri_purecap():
+            targets.append(rootfs_target.get_non_cheri_for_purecap_rootfs_target())
+            targets.append(rootfs_target.get_cheri_hybrid_for_purecap_rootfs_target())
+
+        for target in targets:
+            self.add_compiler_with_config_file(prefix, target)
+
     @classmethod
     def get_install_dir_for_type(cls, caller: SimpleProject, compiler_type: CompilerType):
         if compiler_type == CompilerType.CHERI_LLVM:
@@ -470,10 +502,12 @@ class BuildCheriLLVM(BuildLLVMMonoRepoBase):
     is_sdk_target = True
     native_install_dir = DefaultInstallDir.CHERI_SDK
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
-    default_architecture = CompilationTargets.NATIVE
     # NB: remove_duplicates is needed for --enable-hybrid-for-purecap-rootfs targets.
-    supported_architectures = remove_duplicates(CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS +
-                                                CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS)
+    supported_architectures = remove_tuple_duplicates((
+        *CompilationTargets.ALL_SUPPORTED_CHERIBSD_TARGETS,
+        *CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS,
+        CompilationTargets.NATIVE_NON_PURECAP,
+    ))
     build_all_targets: "ClassVar[bool]"
 
     @classmethod
@@ -500,9 +534,9 @@ class BuildCheriLLVM(BuildLLVMMonoRepoBase):
         # we use {freebsd,cheribsd}-<arch>-<variant>-clang instead of <arch>-cheribsd-<variant>-clang
         if self.compiling_for_host():
             for tgt in CompilationTargets.ALL_CHERIBSD_NON_MORELLO_TARGETS:
-                self.add_compiler_with_config_file("cheribsd", tgt)
+                self.add_compilers_with_config_files("cheribsd", tgt)
             for tgt in CompilationTargets.ALL_SUPPORTED_FREEBSD_TARGETS:
-                self.add_compiler_with_config_file("freebsd", tgt)
+                self.add_compilers_with_config_files("freebsd", tgt)
 
         # llvm-objdump currently doesn't infer the available features
         # This depends on https://reviews.llvm.org/D74023
@@ -536,11 +570,13 @@ class BuildMorelloLLVM(BuildLLVMMonoRepoBase):
     is_sdk_target = True
     native_install_dir = DefaultInstallDir.MORELLO_SDK
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
-    default_architecture = CompilationTargets.NATIVE
 
     # NB: remove_duplicates is needed for --enable-hybrid-for-purecap-rootfs targets.
-    supported_architectures = remove_duplicates(CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS +
-                                                CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS)
+    supported_architectures = remove_tuple_duplicates((
+        *CompilationTargets.ALL_SUPPORTED_CHERIBSD_TARGETS,
+        *CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS,
+        CompilationTargets.NATIVE_NON_PURECAP,
+    ))
 
     @property
     def triple_prefixes_for_binaries(self) -> "Iterable[str]":
@@ -574,7 +610,7 @@ class BuildMorelloLLVM(BuildLLVMMonoRepoBase):
             self.delete_file(self.install_dir / "include/c++/v1")
         if self.compiling_for_host():
             for tgt in CompilationTargets.ALL_CHERIBSD_MORELLO_TARGETS:
-                self.add_compiler_with_config_file("cheribsd", tgt)
+                self.add_compilers_with_config_files("cheribsd", tgt)
 
     @classmethod
     def get_native_install_path(cls, config: CheriConfig):
@@ -646,10 +682,10 @@ class BuildLLVMSplitRepoBase(BuildLLVMBase):
         super().update()
         if "clang" in self.included_projects:
             GitRepository(self.clang_repository).update(self, src_dir=self.source_dir / "tools/clang",
-                                                        revision=self.clang_revision),
+                                                        revision=self.clang_revision)
         if "lld" in self.included_projects:
             GitRepository(self.lld_repository).update(self, src_dir=self.source_dir / "tools/lld",
-                                                      revision=self.lld_revision),
+                                                      revision=self.lld_revision)
         if "lldb" in self.included_projects:  # Not yet usable
             GitRepository(self.lldb_repository).update(self, src_dir=self.source_dir / "tools/lldb",
-                                                       revision=self.lldb_revision),
+                                                       revision=self.lldb_revision)

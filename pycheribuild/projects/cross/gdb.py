@@ -27,39 +27,23 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
+import os
 import shutil
-import typing
-from pathlib import Path
 
-from .crosscompileproject import (BuildType, CheriConfig, CompilationTargets, CrossCompileAutotoolsProject,
-                                  DefaultInstallDir, GitRepository, Linkage, MakeCommandKind)
+from .crosscompileproject import (
+    BuildType,
+    CheriConfig,
+    CompilationTargets,
+    CrossCompileAutotoolsProject,
+    CrossCompileTarget,
+    DefaultInstallDir,
+    GitRepository,
+    Linkage,
+    MakeCommandKind,
+)
 from .gmp import BuildGmp
 from ..project import ComputedDefaultValue
-from ...processutils import run_command
-from ...utils import OSInfo, status_update
-
-
-class TemporarilyRemoveProgramsFromSdk(object):
-    def __init__(self, programs: "typing.List[str]", config: CheriConfig, sdk_bindir: Path):
-        self.programs = programs
-        self.config = config
-        self.sdk_bindir = sdk_bindir
-
-    def __enter__(self):
-        status_update('Temporarily moving', self.programs, "from", self.sdk_bindir)
-        for prog in self.programs:
-            if (self.sdk_bindir / prog).exists():
-                run_command("mv", "-f", prog, prog + ".backup", cwd=self.sdk_bindir,
-                            config=self.config, print_verbose_only=True)
-        return self
-
-    def __exit__(self, *exc):
-        status_update('Restoring', self.programs, "in", self.sdk_bindir)
-        for prog in self.programs:
-            if (self.sdk_bindir / (prog + ".backup")).exists() or self.config.pretend:
-                run_command("mv", "-f", prog + ".backup", prog, cwd=self.sdk_bindir, config=self.config,
-                            print_verbose_only=True)
-        return False
+from ...utils import OSInfo
 
 
 class BuildGDBBase(CrossCompileAutotoolsProject):
@@ -69,20 +53,29 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
     do_not_add_to_targets = True
     is_sdk_target = True
     default_build_type = BuildType.RELEASE
-    supported_architectures = (CompilationTargets.ALL_CHERIBSD_NON_CHERI_TARGETS +
-                               CompilationTargets.ALL_CHERIBSD_HYBRID_TARGETS +
-                               CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS +
-                               CompilationTargets.ALL_SUPPORTED_FREEBSD_TARGETS +
-                               [CompilationTargets.NATIVE_NON_PURECAP])
+    supported_architectures = (
+        *CompilationTargets.ALL_CHERIBSD_NON_CHERI_TARGETS,
+        *CompilationTargets.ALL_CHERIBSD_HYBRID_TARGETS,
+        *CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS,
+        *CompilationTargets.ALL_SUPPORTED_FREEBSD_TARGETS,
+        CompilationTargets.NATIVE_NON_PURECAP,
+    )
     default_architecture = CompilationTargets.NATIVE_NON_PURECAP
     prefer_full_lto_over_thin_lto = True
 
+    @staticmethod
+    def custom_target_name(base_target: str, xtarget: CrossCompileTarget) -> str:
+        if xtarget is CompilationTargets.NATIVE_NON_PURECAP and xtarget != CompilationTargets.NATIVE:
+            assert xtarget.generic_target_suffix == "native-hybrid", xtarget.generic_target_suffix
+            return base_target + "-native"
+        return base_target + "-" + xtarget.generic_target_suffix
+
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         deps = super().dependencies(config)
         # For the native and native-hybrid builds gmp must be installed via ports.
         if not cls.get_crosscompile_target().is_native():
-            deps.append("gmp")
+            deps += ("gmp",)
         return deps
 
     @classmethod
@@ -97,6 +90,7 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
 
     def check_system_dependencies(self) -> None:
         super().check_system_dependencies()
+        self.check_required_system_tool("makeinfo", default="texinfo")
         if self.compiling_for_host() and self.target_info.is_cheribsd():
             self.check_required_pkg_config("gmp", freebsd="gmp")
             self.check_required_pkg_config("expat", freebsd="expat")
@@ -153,6 +147,14 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
         self.cross_warning_flags.append("-Wno-error=incompatible-pointer-types")
         self.configure_args.append("--enable-targets=all")
         if self.compiling_for_host():
+            # GDB can't target macOS/arm64 so use a macOS/amd64 triple
+            if self.target_info.is_macos() and self.crosscompile_target.is_aarch64():
+                x86_target = "x86_64-apple-darwin" + os.uname().release
+                self.configure_args.append("--target=" + x86_target)
+                self.native_target_prefix = x86_target + "-"
+            else:
+                self.native_target_prefix = None
+
             if self.target_info.is_freebsd():
                 self.LDFLAGS.append(f"-L{self.target_info.localbase}/lib")  # Expat/GMP are in $LOCALBASE
             self.configure_args.append("--with-expat")
@@ -164,7 +166,7 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
                                               # (ZW_PROG_COMPILER_DEPENDENCIES([CC])) -> for gcc3 mode which seems
                                               # correct
                                               am_cv_CC_dependencies_compiler_type="gcc3",
-                                              MAKEINFO="/bin/false"
+                                              MAKEINFO="/bin/false",
                                               )
             self.configure_args.append("--with-gmp=" + str(BuildGmp.get_install_dir(self)))
             # GDB > 12 only uses --with-gmp
@@ -213,20 +215,18 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
         super().configure()
 
     def compile(self, **kwargs):
-        with TemporarilyRemoveProgramsFromSdk(["as", "ld", "objcopy", "objdump"], self.config,
-                                              self.install_dir):
-            # also install objdump
-            self.run_make(make_target="all-binutils", cwd=self.build_dir)
-            self.run_make(make_target="all-gdb", cwd=self.build_dir)
-            # And for native GDB also build ld.bfd
-            if self.compiling_for_host():
-                self.run_make(make_target="all-ld", cwd=self.build_dir)
+        self.run_make(make_target="all-gdb", cwd=self.build_dir)
+        self.run_make(make_target="all-binutils", cwd=self.build_dir)  # also install objdump
+        # And for native GDB also build ld.bfd
+        if self.compiling_for_host():
+            self.run_make(make_target="all-ld", cwd=self.build_dir)
 
     def install(self, **kwargs):
         self.run_make_install(target="install-gdb")
         # Install the binutils prefixed with g (like homebrew does it on MacOS)
         # objdump is useful for cases where CHERI llvm-objdump doesn't print sensible source lines
         # Also install most of the other tools in case they work better than elftoolchain
+        # Also symlink macOS/amd64 triple prefixed gdb files to their unprefixed names on macOS/arm64
         if self.compiling_for_host():
             binutils = ("objdump", "objcopy", "addr2line", "readelf", "ar", "ranlib", "size", "strings")
             bindir = self.install_dir / "bin"
@@ -236,6 +236,14 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
             self.install_file(self.build_dir / "binutils/cxxfilt", bindir / "gc++filt")
             self.install_file(self.build_dir / "binutils/nm-new", bindir / "gnm")
             self.install_file(self.build_dir / "binutils/strip-new", bindir / "gstrip")
+
+            if self.native_target_prefix is not None:
+                gdbfiles = ("man/man5/gdbinit.5", "man/man1/gdbserver.1", "man/man1/gdb.1", "man/man1/gdb-add-index.1",
+                            "bin/gdb", "bin/gdb-add-index")
+                for file in gdbfiles:
+                    dst = self.install_dir / file
+                    src = dst.parent / (self.native_target_prefix + dst.name)
+                    self.create_symlink(src, dst)
 
 
 class BuildUpstreamGDB(BuildGDBBase):
@@ -267,7 +275,10 @@ class BuildGDB(BuildGDBBase):
 
 
 class BuildKGDB(BuildGDB):
-    repository = GitRepository("https://github.com/CTSRD-CHERI/gdb.git",
-                               # Branch name is changed for every major GDB release:
-                               default_branch="mips_cheri-8.3-kgdb", force_branch=True,
-                               old_urls=[b'https://github.com/bsdjhb/gdb.git'])
+    default_branch = "cheri-12-kgdb"
+    repository = GitRepository(
+        "https://github.com/CTSRD-CHERI/gdb.git",
+        # Branch name is changed for every major GDB release:
+        default_branch=default_branch,
+        old_branches={"mips_cheri-8.3-kgdb": default_branch},
+        old_urls=[b'https://github.com/bsdjhb/gdb.git'])

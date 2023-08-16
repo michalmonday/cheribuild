@@ -34,8 +34,13 @@ import datetime
 import os
 from pathlib import Path
 
-from run_tests_common import (boot_cheribsd, finish_and_write_junit_xml_report, get_default_junit_xml_name, junitparser,
-                              run_tests_main)
+from run_tests_common import (
+    boot_cheribsd,
+    finish_and_write_junit_xml_report,
+    get_default_junit_xml_name,
+    junitparser,
+    run_tests_main,
+)
 
 
 def setup_qtbase_tests(qemu: boot_cheribsd.QemuCheriBSDInstance, args: argparse.Namespace):
@@ -88,12 +93,12 @@ def copy_qt_libs_to_tmpfs_and_set_libpath(qemu: boot_cheribsd.QemuCheriBSDInstan
             if os.path.pathsep in linkpath:
                 boot_cheribsd.failure("Unexpected link path for ", lib.absolute(), ": ", linkpath, exit=False)
                 continue
-            qemu.checked_run("ln -sfn {} /tmp/qt-libs/{}".format(linkpath, lib.name))
+            qemu.checked_run(f"ln -sfn {linkpath} /tmp/qt-libs/{lib.name}")
         else:
             if args.copy_libraries_to_tmpfs_using_scp:
                 qemu.scp_to_guest(lib, "/tmp/qt-libs/" + lib.name)
             else:
-                qemu.checked_run("cp -fav /build/lib/{} /tmp/qt-libs/".format(lib.name))
+                qemu.checked_run(f"cp -fav /build/lib/{lib.name} /tmp/qt-libs/")
             num_libs += 1
     boot_cheribsd.success("Copied ", num_libs, " files to tmpfs")
     boot_cheribsd.prepend_ld_library_path(qemu, "/tmp/qt-libs")
@@ -115,9 +120,11 @@ def run_subdir(qemu: boot_cheribsd.CheriBSDInstance, subdir: Path, xml: junitpar
         try:
             # Output textual results to stdout and write JUnit XML to /build/test.xml
             # Many of the test cases expect that the CWD == test binary dir
-            qemu.checked_run("cd {test_dir} && rm -f {xml_name} && ./{test} -o {xml_name},junitxml -o -,txt -v1 && "
-                             "fsync {xml_name}".format(xml_name=test_xml.name, test_dir=f.parent, test=f.name),
-                             timeout=10 * 60)
+            qemu.checked_run(
+                f"cd {f.parent} && rm -f {test_xml.name} && ./{f.name} -o {test_xml.name},junitxml -o -,txt -v1 && "
+                f"fsync {test_xml.name}",
+                timeout=10 * 60,
+            )
         except boot_cheribsd.CheriBSDCommandFailed as e:
             boot_cheribsd.failure("Failed to run ", f.name, ": ", str(e), exit=False)
             # Send CTRL+C in case the process timed out.
@@ -141,8 +148,13 @@ def run_subdir(qemu: boot_cheribsd.CheriBSDInstance, subdir: Path, xml: junitpar
             add_junit_failure(xml, f, str(e), starttime, test_xml)
 
 
-def add_junit_failure(xml: junitparser.JUnitXml, test: Path, message: str, starttime: datetime.datetime,
-                      input_xml: Path):
+def add_junit_failure(
+    xml: junitparser.JUnitXml,
+    test: Path,
+    message: str,
+    starttime: datetime.datetime,
+    input_xml: Path,
+):
     t = junitparser.TestCase(name=test.name)
     t.result = junitparser.Failure(message=str(message))
     t.time = (datetime.datetime.utcnow() - starttime).total_seconds()
@@ -162,7 +174,7 @@ def run_qtbase_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namesp
     all_tests_starttime = datetime.datetime.utcnow()
     tests_root = Path(build_dir, "tests/auto")
     # Start with a basic smoketests:
-    qemu.checked_run("echo \"Checking for MIME database\" && stat /usr/local/share/mime/mime.cache")
+    qemu.checked_run('echo "Checking for MIME database" && stat /usr/local/share/mime/mime.cache')
     if (tests_root / "corelib").is_dir():
         # For QtBase:
         qemu.checked_run("ldd /build/tests/auto/corelib/tools/qarraydata/tst_qarraydata")
@@ -202,26 +214,51 @@ def adjust_args(args: argparse.Namespace):
 
 
 def add_args(parser: argparse.ArgumentParser):
-    parser.add_argument("--test-subset", action="append", default=[],
-                        help="Subset of tests to run (set to '.' to run all tests)")
+    parser.add_argument(
+        "--test-subset",
+        action="append",
+        default=[],
+        help="Subset of tests to run (set to '.' to run all tests)",
+    )
     parser.add_argument("--junit-xml", required=False, help="Output file name for the JUnit XML results")
     # Note: Copying to tmpfs is not enabled by default since it currently hangs/is very slow on purecap RISC-V.
-    parser.add_argument("--copy-libraries-to-tmpfs", action="store_true", dest="copy_libraries_to_tmpfs", default=True,
-                        help="Copy the Qt libraries to tmpfs first instead of loading them from smbfs")
+    parser.add_argument(
+        "--copy-libraries-to-tmpfs",
+        action="store_true",
+        dest="copy_libraries_to_tmpfs",
+        default=True,
+        help="Copy the Qt libraries to tmpfs first instead of loading them from smbfs",
+    )
     # For now use `scp` to copy the libraries instead of a `cp` from smbfs since the cp appears to hang.
-    parser.add_argument("--copy-libraries-to-tmpfs-using-scp", action="store_true",
-                        dest="copy_libraries_to_tmpfs_using_scp", default=True,
-                        help="Copy the Qt libraries to tmpfs using scp instead of smbfs")
-    parser.add_argument("--copy-libraries-to-tmpfs-from-smbfs", action="store_false",
-                        dest="copy_libraries_to_tmpfs_using_scp",
-                        help="Copy the Qt libraries to tmpfs using scp instead of smbfs")
-    parser.add_argument("--no-copy-libraries-to-tmpfs", action="store_false", dest="copy_libraries_to_tmpfs",
-                        help="Copy the Qt libraries to tmpfs first instead of loading them from smbfs")
+    parser.add_argument(
+        "--copy-libraries-to-tmpfs-using-scp",
+        action="store_true",
+        dest="copy_libraries_to_tmpfs_using_scp",
+        default=True,
+        help="Copy the Qt libraries to tmpfs using scp instead of smbfs",
+    )
+    parser.add_argument(
+        "--copy-libraries-to-tmpfs-from-smbfs",
+        action="store_false",
+        dest="copy_libraries_to_tmpfs_using_scp",
+        help="Copy the Qt libraries to tmpfs using scp instead of smbfs",
+    )
+    parser.add_argument(
+        "--no-copy-libraries-to-tmpfs",
+        action="store_false",
+        dest="copy_libraries_to_tmpfs",
+        help="Copy the Qt libraries to tmpfs first instead of loading them from smbfs",
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # we don't need ssh running to execute the tests, but we do need the sysroot for libexecinfo+libelf
-    run_tests_main(test_function=run_qtbase_tests, test_setup_function=setup_qtbase_tests,
-                   argparse_adjust_args_callback=adjust_args,
-                   argparse_setup_callback=add_args, need_ssh=True,
-                   should_mount_sysroot=False, should_mount_srcdir=True)
+    run_tests_main(
+        test_function=run_qtbase_tests,
+        test_setup_function=setup_qtbase_tests,
+        argparse_adjust_args_callback=adjust_args,
+        argparse_setup_callback=add_args,
+        need_ssh=True,
+        should_mount_sysroot=False,
+        should_mount_srcdir=True,
+    )

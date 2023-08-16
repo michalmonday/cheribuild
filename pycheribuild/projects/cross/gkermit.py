@@ -23,9 +23,10 @@
 # SUCH DAMAGE.
 
 from pathlib import Path
+from typing import Optional
 
-from ..project import ExternallyManagedSourceRepository
 from .crosscompileproject import CrossCompileMakefileProject, DefaultInstallDir
+from ..project import ExternallyManagedSourceRepository
 
 
 class BuildGKermit(CrossCompileMakefileProject):
@@ -40,7 +41,7 @@ class BuildGKermit(CrossCompileMakefileProject):
         self.common_warning_flags.append("-Wno-unused-value")
         self.common_warning_flags.append("-Wno-non-literal-null-conversion")
         self.make_args.set_env(KFLAGS=self.commandline_to_str(
-            self.default_compiler_flags + ["-include", "unistd.h"]))
+            [*self.default_compiler_flags, "-include", "unistd.h"]))
 
     def update(self):
         filename = "gku201.tar.gz"
@@ -52,7 +53,7 @@ class BuildGKermit(CrossCompileMakefileProject):
         if not (self.source_dir / "makefile").is_file():
             self.run_cmd(["tar", "xzvf", self.source_dir / filename, "-C", self.source_dir])
 
-    def compile(self, cwd: Path = None, parallel: bool = True):
+    def compile(self, cwd: "Optional[Path]" = None, parallel: bool = True):
         if cwd is None:
             cwd = self.build_dir
         self.run_make("gkermit", cwd=cwd, parallel=parallel)

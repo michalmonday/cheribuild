@@ -40,7 +40,7 @@ class BuildRtems(CrossCompileProject):
                                force_branch=True, default_branch="cheri_waf1")
     target = "rtems"
     include_os_in_target_suffix = False
-    dependencies = ["newlib", "compiler-rt-builtins"]
+    dependencies = ("newlib", "compiler-rt-builtins")
     is_sdk_target = True
     needs_sysroot = False  # We don't need a complete sysroot
     supported_architectures = CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS
@@ -58,7 +58,7 @@ class BuildRtems(CrossCompileProject):
             self.rtems_bsps = ["rv64imafdc_medany"]
 
     def _run_waf(self, *args, **kwargs):
-        cmdline = [self.source_dir / "waf", "-t", self.source_dir, "-o", self.build_dir] + list(args)
+        cmdline = [self.source_dir / "waf", "-t", self.source_dir, "-o", self.build_dir, *list(args)]
         if self.config.verbose:
             cmdline.append("-v")
         return self.run_cmd(cmdline, cwd=self.source_dir, **kwargs)
@@ -86,12 +86,13 @@ class BuildRtems(CrossCompileProject):
 
 class LaunchRtemsQEMU(LaunchQEMUBase):
     target = "run-rtems"
-    dependencies = ["rtems"]
-    supported_architectures = [CompilationTargets.RTEMS_RISCV64_PURECAP]
+    dependencies = ("rtems",)
+    supported_architectures = (CompilationTargets.RTEMS_RISCV64_PURECAP,)
     forward_ssh_port = False
     qemu_user_networking = False
     _enable_smbfs_support = False
     _add_virtio_rng = False
+    _uses_disk_image = False
 
     def setup(self):
         super().setup()

@@ -28,45 +28,45 @@
 # SUCH DAMAGE.
 #
 import shutil
-import typing
 from pathlib import Path
 
 from .benchmark_mixin import BenchmarkMixin
-from .crosscompileproject import (BuildType, CompilationTargets, CrossCompileCMakeProject, DefaultInstallDir,
-                                  GitRepository)
-from .llvm import BuildCheriLLVM, BuildUpstreamLLVM, BuildLLVMBase
+from .crosscompileproject import (
+    BuildType,
+    CompilationTargets,
+    CrossCompileCMakeProject,
+    DefaultInstallDir,
+    GitRepository,
+)
+from .llvm import BuildCheriLLVM, BuildLLVMBase, BuildUpstreamLLVM
 from ..project import ReuseOtherProjectRepository
-from ...utils import cached_property, is_jenkins_build, classproperty
+from ..simple_project import BoolConfigOption
 from ...config.compilation_targets import FreeBSDTargetInfo
+from ...utils import cached_property, classproperty, is_jenkins_build
 
 
 class BuildLLVMTestSuiteBase(BenchmarkMixin, CrossCompileCMakeProject):
     do_not_add_to_targets = True
     default_build_type = BuildType.RELEASE
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
+    collect_stats = BoolConfigOption("collect-stats", help="Collect statistics from the compiler")
 
     @classmethod
-    def dependencies(cls, config) -> "list[str]":
-        return [cls.llvm_project.get_class_for_target(CompilationTargets.NATIVE).target]
+    def dependencies(cls, config) -> "tuple[str, ...]":
+        return (cls.llvm_project.get_class_for_target(CompilationTargets.NATIVE_NON_PURECAP).target,)
 
     # noinspection PyMethodParameters
     @classproperty
-    def llvm_project(cls) -> typing.Type[BuildLLVMBase]:
-        target_info = cls.get_crosscompile_target().target_info_cls
+    def llvm_project(self) -> "type[BuildLLVMBase]":
+        target_info = self.get_crosscompile_target().target_info_cls
         if issubclass(target_info, FreeBSDTargetInfo):
             # noinspection PyProtectedMember
             return target_info._get_compiler_project()
         else:
             return BuildCheriLLVM
 
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(**kwargs)
-        cls.collect_stats = cls.add_bool_option("collect-stats", default=False,
-                                                help="Collect statistics from the compiler")
-
     def __find_in_sdk_or_llvm_build_dir(self, name) -> Path:
-        llvm_project = self.llvm_project.get_instance(self, cross_target=CompilationTargets.NATIVE)
+        llvm_project = self.llvm_project.get_instance(self, cross_target=CompilationTargets.NATIVE_NON_PURECAP)
         if (llvm_project.build_dir / "bin" / name).exists():
             return llvm_project.build_dir / "bin" / name
         if is_jenkins_build() and not self.compiling_for_host():
@@ -142,16 +142,18 @@ class BuildLLVMTestSuiteCheriBSDUpstreamLLVM(BuildLLVMTestSuite):
     target = "llvm-test-suite-cheribsd-upstream-llvm"
     repository = ReuseOtherProjectRepository(BuildLLVMTestSuite, do_update=True)
     llvm_project = BuildUpstreamLLVM
-    supported_architectures = CompilationTargets.ALL_CHERIBSD_NON_CHERI_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_CHERIBSD_NON_CHERI_TARGETS + CompilationTargets.ALL_NATIVE
 
     @property
     def custom_c_preprocessor(self):
-        return self.llvm_project.get_install_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/clang-cpp"
+        return self.llvm_project.get_install_dir(
+            self, cross_target=CompilationTargets.NATIVE_NON_PURECAP) / "bin/clang-cpp"
 
     @property
     def custom_c_compiler(self):
-        return self.llvm_project.get_install_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/clang"
+        return self.llvm_project.get_install_dir(self, cross_target=CompilationTargets.NATIVE_NON_PURECAP) / "bin/clang"
 
     @property
     def custom_cxx_compiler(self):
-        return self.llvm_project.get_install_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/clang++"
+        return self.llvm_project.get_install_dir(
+            self, cross_target=CompilationTargets.NATIVE_NON_PURECAP) / "bin/clang++"

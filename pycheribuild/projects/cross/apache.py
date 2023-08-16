@@ -28,10 +28,15 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-from .crosscompileproject import CrossCompileAutotoolsProject, CrossCompileCMakeProject, DefaultInstallDir
-from .crosscompileproject import GitRepository, SubversionRepository
-from ..project import ReuseOtherProjectRepository
+from .crosscompileproject import (
+    CrossCompileAutotoolsProject,
+    CrossCompileCMakeProject,
+    DefaultInstallDir,
+    GitRepository,
+    SubversionRepository,
+)
 from .expat import BuildExpat
+from ..project import ReuseOtherProjectRepository
 
 
 class BuildPcre(CrossCompileAutotoolsProject):
@@ -52,7 +57,7 @@ class BuildApr(CrossCompileAutotoolsProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/apr.git",
                                default_branch="cheri")
 
-    dependencies = ["libexpat"]
+    dependencies = ("libexpat",)
 
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
 
@@ -62,7 +67,7 @@ class BuildApr(CrossCompileAutotoolsProject):
             "--enable-threads",
             "--enable-posix-shm",
             "--with-devrandom",
-            "--with-expat=" + str(BuildExpat.get_install_dir(self))
+            "--with-expat=" + str(BuildExpat.get_install_dir(self)),
             ])
         if self.build_type.is_debug:
             self.configure_args.append("--enable-debug")
@@ -96,7 +101,7 @@ class BuildApache(CrossCompileAutotoolsProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/apache-httpd.git",
                                default_branch="2.4.x-cheri")
 
-    dependencies = ["apr", "pcre"]
+    dependencies = ("apr", "pcre")
 
     def setup(self):
         super().setup()
@@ -152,10 +157,10 @@ class BuildSSLProcApache(BuildApache):
 
     repository = ReuseOtherProjectRepository(BuildApache, do_update=True)
 
-    dependencies = BuildApache.dependencies + ["sslproc"]
+    dependencies = (*BuildApache.dependencies, "sslproc")
 
     def setup(self):
         super().setup()
         self.configure_args.append(
-            "--with-sslproc=" + str(BuildSSLProc.get_install_dir(self))
+            "--with-sslproc=" + str(BuildSSLProc.get_install_dir(self)),
             )

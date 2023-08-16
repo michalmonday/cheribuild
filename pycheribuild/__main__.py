@@ -35,25 +35,37 @@ import subprocess
 import sys
 import traceback
 from collections import OrderedDict
+
 # noinspection PyUnresolvedReferences
 from pathlib import Path
 
-from .config.defaultconfig import CheribuildAction, DefaultCheriConfig, DefaultCheribuildConfigLoader
+from .config.defaultconfig import CheribuildAction, DefaultCheribuildConfigLoader, DefaultCheriConfig
+
 # First thing we need to do is set up the config loader (before importing anything else!)
 # We can't do from .configloader import ConfigLoader here because that will only update the local copy!
 # https://stackoverflow.com/questions/3536620/how-to-change-a-module-variable-from-another-module
-from .config.loader import MyJsonEncoder, ConfigOptionBase
+from .config.loader import ConfigOptionBase, MyJsonEncoder
+from .processutils import get_program_version, print_command, run_and_kill_children_on_exit, run_command
+
 # make sure all projects are loaded so that target_manager gets populated
 # noinspection PyUnresolvedReferences
-from .projects import *  # noqa: F401,F403
+from .projects import *  # noqa: F401, F403, RUF100
+
 # noinspection PyUnresolvedReferences
-from .projects.cross import *  # noqa: F401,F403
-from .projects.simple_project import SimpleProject
+from .projects.cross import *  # noqa: F401, F403, RUF100
 from .projects.repository import GitRepository
-from .targets import target_manager, Target
-from .processutils import (get_program_version, print_command, run_and_kill_children_on_exit, run_command)
-from .utils import (AnsiColour, coloured, fatal_error, have_working_internet_connection, init_global_config,
-                    status_update, query_yes_no)
+from .projects.simple_project import SimpleProject
+from .targets import Target, target_manager
+from .utils import (
+    AnsiColour,
+    coloured,
+    fatal_error,
+    have_working_internet_connection,
+    init_global_config,
+    query_yes_no,
+    status_update,
+)
+
 DIRS_TO_CHECK_FOR_UPDATES: "list[Path]" = [Path(__file__).parent.parent]
 
 
@@ -72,7 +84,7 @@ def _update_check(config: DefaultCheriConfig, d: Path) -> None:
     project_dir = str(d)
     run_command(["git", "fetch"], cwd=project_dir, timeout=5, config=config)
     branch_info = GitRepository.get_branch_info(d)
-    if branch_info.upstream_branch == "master":
+    if branch_info is not None and branch_info.upstream_branch == "master":
         if query_yes_no(config, f"The local {branch_info.local_branch} branch is tracking the obsolete remote 'master'"
                                 f" branch, would you like to switch to 'main'?", force_result=False):
             # Update the remote ref to point to "main".
@@ -94,7 +106,7 @@ def _update_check(config: DefaultCheriConfig, d: Path) -> None:
             # Use the autostash flag for Git >= 2.14
             # https://stackoverflow.com/a/30209750/894271
             autostash_flag = ["--autostash"] if git_version >= (2, 14) else []
-            run_command(["git", "pull", "--rebase"] + autostash_flag, cwd=project_dir, config=config)
+            run_command(["git", "pull", "--rebase", *autostash_flag], cwd=project_dir, config=config)
             os.execv(sys.argv[0], sys.argv)
 
 
@@ -105,7 +117,7 @@ def ensure_fd_is_blocking(fd) -> None:
         fcntl.fcntl(fd, fcntl.F_SETFL, flag & ~os.O_NONBLOCK)
     flag = fcntl.fcntl(fd, fcntl.F_GETFL)
     if flag & os.O_NONBLOCK:
-        fatal_error("fd", fd, "is set to nonblocking and could not unset flag")
+        fatal_error("fd", fd, "is set to nonblocking and could not unset flag", pretend=False)
 
 
 def check_not_root() -> None:
@@ -140,7 +152,7 @@ def real_main() -> None:
         all_target_names = list(sorted(target_manager.target_names(None)))
     run_everything_target = "__run_everything__"
     # Register all command line options
-    cheri_config = DefaultCheriConfig(config_loader, all_target_names + [run_everything_target])
+    cheri_config = DefaultCheriConfig(config_loader, [*all_target_names, run_everything_target])
     # Make sure nothing other than the config loader uses this as it will include disabled target names
     del all_target_names
     SimpleProject._config_loader = config_loader
@@ -160,6 +172,8 @@ def real_main() -> None:
         sys.exit()
     elif CheribuildAction.DUMP_CONFIGURATION in cheri_config.action:
         json_dict = OrderedDict()
+        cheri_config.pretend = True
+        cheri_config.quiet = True
         for v in cheri_config.loader.options.values():
             try:
                 json_dict[v.full_option_name] = get_config_option_value(v, cheri_config)
@@ -171,7 +185,9 @@ def real_main() -> None:
         sys.exit()
     elif cheri_config.get_config_option:
         if cheri_config.get_config_option not in config_loader.options:
-            fatal_error("Unknown config key", cheri_config.get_config_option)
+            fatal_error("Unknown config key", cheri_config.get_config_option, pretend=False)
+        cheri_config.pretend = True
+        cheri_config.quiet = True
         option = config_loader.options[cheri_config.get_config_option]
         print(get_config_option_value(option, cheri_config))
         sys.exit()
@@ -206,7 +222,7 @@ def real_main() -> None:
                 "-v", str(cheri_config.build_root.absolute()) + ":/build",
                 "-v", str(cheri_config.output_root.absolute()) + ":/output",
                 ]
-            cheribuild_args = ["/cheribuild/cheribuild.py", "--skip-update"] + filtered_cheribuild_args
+            cheribuild_args = ["/cheribuild/cheribuild.py", "--skip-update", *filtered_cheribuild_args]
             if cheri_config.docker_reuse_container:
                 # Use docker restart + docker exec instead of docker run
                 # FIXME: docker restart doesn't work for some reason
@@ -216,11 +232,11 @@ def real_main() -> None:
                 start_cmd = ["docker", "start", cheri_config.docker_container]
                 print_command(start_cmd)
                 subprocess.check_call(start_cmd)
-                docker_run_cmd = ["docker", "exec", cheri_config.docker_container] + cheribuild_args
+                docker_run_cmd = ["docker", "exec", cheri_config.docker_container, *cheribuild_args]
             else:
-                docker_run_cmd = ["docker", "run", "--user", str(os.getuid()) + ":" + str(os.getgid()),
-                                  "--rm", "--interactive", "--tty"] + docker_dir_mappings
-                docker_run_cmd += [cheri_config.docker_container] + cheribuild_args
+                docker_run_cmd = ["docker", "run", "--user", str(os.getuid()) + ":" + str(os.getgid()), "--rm",
+                                  "--interactive", "--tty", *docker_dir_mappings]
+                docker_run_cmd += [cheri_config.docker_container, *cheribuild_args]
             run_command(docker_run_cmd, config=cheri_config, give_tty_control=True)
         except subprocess.CalledProcessError as e:
             # if the image is missing print a helpful error message:
@@ -241,7 +257,7 @@ def real_main() -> None:
         if cheri_config.libcompat_buildenv or cheri_config.buildenv:
             cheri_config.targets.append("cheribsd")
         else:
-            fatal_error("At least one target name is required (see --list-targets).")
+            fatal_error("At least one target name is required (see --list-targets).", pretend=False)
 
     if not cheri_config.quiet:
         print("Sources will be stored in", cheri_config.source_root)
@@ -254,7 +270,7 @@ def real_main() -> None:
         if not cheri_config.pretend:
             if cheri_config.verbose:
                 print_command("mkdir", "-p", str(d))
-            os.makedirs(str(d), exist_ok=True)
+            d.mkdir(parents=True, exist_ok=True)
 
     # Don't do the update check when tab-completing (otherwise it freezes)
     if "_ARGCOMPLETE" not in os.environ and not cheri_config.skip_update:  # no-combine
@@ -303,7 +319,7 @@ def main() -> None:
             raise e
         else:
             traceback.print_exc()
-            fatal_error("Unhandled exception:", e, fatal_when_pretending=True)
+            fatal_error("Unhandled exception:", e, fatal_when_pretending=True, pretend=False)
 
 
 if __name__ == "__main__":

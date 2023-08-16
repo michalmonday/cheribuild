@@ -26,8 +26,8 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-import typing
 from pathlib import Path
+from typing import Optional
 
 from .crosscompileproject import CompilationTargets, CrossCompileProject, GitRepository
 from ..project import DefaultInstallDir, Project
@@ -47,21 +47,21 @@ class BuildCheriExercises(CrossCompileProject):
 
     target = "cheri-exercises"
     repository = GitRepository("https://github.com/CTSRD-CHERI/cheri-exercises.git")
-    supported_architectures = [CompilationTargets.CHERIBSD_RISCV_PURECAP,
-                               CompilationTargets.CHERIBSD_MORELLO_PURECAP]
+    supported_architectures = (CompilationTargets.CHERIBSD_RISCV_PURECAP,
+                               CompilationTargets.CHERIBSD_MORELLO_PURECAP)
     default_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
     path_in_rootfs = "/opt/cheri-exercises"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.compiled_files = []  # type: typing.List[Path]
+        self.compiled_files: "list[Path]" = []
 
-    def _compile_file(self, output: Path, *args, target_override: CrossCompileTarget = None):
+    def _compile_file(self, output: Path, *args, target_override: "Optional[CrossCompileTarget]" = None):
         assert isinstance(self.target_info, CheriBSDTargetInfo)
         target_flags = self.target_info.get_essential_compiler_and_linker_flags(xtarget=target_override,
                                                                                 default_flags_only=True)
         warning_flags = ["-Wall", "-Wcheri"]
-        self.run_cmd([self.CC] + target_flags + warning_flags + ["-g", "-fuse-ld=lld", "-o", output, *args],
+        self.run_cmd([str(self.CC), *target_flags, *warning_flags, "-g", "-fuse-ld=lld", "-o", output, *args],
                      print_verbose_only=False)
         self.compiled_files.append(output)
 
@@ -115,6 +115,15 @@ class BuildCheriExercises(CrossCompileProject):
             "long-over-pipe", self.source_dir / "src/exercises/pointer-injection/long-over-pipe.c")
         self._compile_for_cheri_and_non_cheri(
             "ptr-over-pipe", self.source_dir / "src/exercises/pointer-injection/ptr-over-pipe.c")
+
+        # Demonstrate pointer revocation
+        self._compile_file(
+            self.build_dir / "pointer-revocation-temporal-control",
+            self.source_dir / "src/exercises/pointer-revocation/temporal-control.c")
+        self._compile_file(
+            self.build_dir / "pointer-revocation-temporal-control-caprevoke",
+            self.source_dir / "src/exercises/pointer-revocation/temporal-control.c",
+            "-DCAPREVOKE")
 
         # Demonstrate various CheriABI properties
         self._compile_for_cheri_and_non_cheri(

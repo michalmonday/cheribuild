@@ -35,19 +35,26 @@ import sys
 import typing
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 from .build_qemu import BuildQEMU, BuildQEMUBase, BuildUpstreamQEMU
 from .cherios import BuildCheriOS
 from .cross.cheribsd import BuildCHERIBSD, BuildCheriBsdMfsKernel, BuildFreeBSD, ConfigPlatform, KernelABI
 from .cross.gdb import BuildGDB
 from .cross.u_boot import BuildUBoot
-from .disk_image import (BuildCheriBSDDiskImage, BuildDiskImageBase, BuildFreeBSDImage,
-                         BuildFreeBSDWithDefaultOptionsDiskImage, BuildMinimalCheriBSDDiskImage)
-from .project import CheriConfig, CPUArchitecture, Project, ComputedDefaultValue
-from .simple_project import SimpleProject, TargetAliasWithDependencies
+from .disk_image import (
+    BuildCheriBSDDiskImage,
+    BuildDiskImageBase,
+    BuildFreeBSDImage,
+    BuildFreeBSDWithDefaultOptionsDiskImage,
+    BuildMinimalCheriBSDDiskImage,
+)
+from .project import CheriConfig, ComputedDefaultValue, CPUArchitecture, Project
+from .simple_project import BoolConfigOption, SimpleProject, TargetAliasWithDependencies
 from ..config.compilation_targets import CompilationTargets
-from ..qemu_utils import qemu_supports_9pfs, QemuOptions, riscv_bios_arguments
-from ..utils import AnsiColour, classproperty, coloured, find_free_port, OSInfo, fatal_error
+from ..config.target_info import CrossCompileTarget
+from ..qemu_utils import QemuOptions, qemu_supports_9pfs, riscv_bios_arguments
+from ..utils import AnsiColour, OSInfo, classproperty, coloured, fatal_error, find_free_port, is_jenkins_build
 
 
 def get_default_ssh_forwarding_port(addend: int):
@@ -64,9 +71,9 @@ class QEMUType(Enum):
     CUSTOM = "custom"
 
 
-class ChosenQEMU(object):
-    def __init__(self, cls: typing.Optional[typing.Type[BuildQEMUBase]], binary: typing.Optional[Path],
-                 can_provide_src_via_smb: typing.Optional[bool]):
+class ChosenQEMU:
+    def __init__(self, cls: "Optional[type[BuildQEMUBase]]", binary: Optional[Path],
+                 can_provide_src_via_smb: Optional[bool]):
         self.cls = cls
         self._binary = binary
         self._can_provide_src_via_smb = can_provide_src_via_smb
@@ -123,44 +130,46 @@ class LaunchQEMUBase(SimpleProject):
     do_not_add_to_targets = True
     forward_ssh_port = True
     _can_provide_src_via_smb = False
-    ssh_forwarding_port = None  # type: int
+    ssh_forwarding_port: Optional[int] = None
     custom_qemu_smb_mount = None
     needs_sysroot = False
     # Add a virtio RNG to speed up random number generation
     _add_virtio_rng = True
     _enable_smbfs_support = True
-    _cached_chosen_qemu = None  # type: typing.Optional[ChosenQEMU]
+    _cached_chosen_qemu: Optional[ChosenQEMU] = None
     use_qemu: QEMUType
-    custom_qemu_path: Path
-    kernel_project: typing.Optional[Project] = None
-    disk_image_project: typing.Optional[Project] = None
+    custom_qemu_path: Optional[Path]
+    kernel_project: Optional[Project] = None
+    disk_image_project: Optional[Project] = None
+    _uses_disk_image = True
+
+    use_uboot = BoolConfigOption("use-u-boot", default=False,
+                                 help="Boot using U-Boot for UEFI if supported (only RISC-V)")
+    cvtrace = BoolConfigOption("cvtrace", help="Use binary trace output instead of textual")
 
     @classmethod
-    def setup_config_options(cls, default_ssh_port: int = None, **kwargs):
+    def setup_config_options(cls, default_ssh_port: "Optional[int]" = None, **kwargs):
         super().setup_config_options(**kwargs)
-        cls.use_qemu = cls.add_config_option("use-qemu", kind=QEMUType, default=QEMUType.DEFAULT,
-                                             enum_choice_strings=[t.value for t in QEMUType],
-                                             help="The QEMU type to run with. When set to 'custom', "
-                                             "the 'custom-qemu-path' option must also be set.")
-        cls.custom_qemu_path = cls.add_path_option("custom-qemu-path", help="Path to the custom QEMU binary",
-                                                   default=None)
-        cls.use_uboot = cls.add_bool_option("use-u-boot", default=False,
-                                            help="Boot using U-Boot for UEFI if supported (only RISC-V)")
-        cls.extra_qemu_options = cls.add_config_option("extra-options", default=[], kind=list, metavar="QEMU_OPTIONS",
-                                                       help="Additional command line flags to pass to qemu-system")
-        cls.logfile = cls.add_path_option("logfile", default=None, metavar="LOGFILE",
-                                          help="The logfile that QEMU should use.")
-        cls.log_directory = cls.add_path_option("log-directory", default=None, metavar="DIR",
-                                                help="If set QEMU will log to a timestamped file in this directory. "
-                                                     "Will be ignored if the 'logfile' option is set")
+        cls.use_qemu = typing.cast(QEMUType, cls.add_config_option(
+            "use-qemu", kind=QEMUType, default=QEMUType.DEFAULT, enum_choice_strings=[t.value for t in QEMUType],
+            help="The QEMU type to run with. When set to 'custom', the 'custom-qemu-path' option must also be set."))
+        cls.custom_qemu_path = cls.add_optional_path_option("custom-qemu-path", help="Path to the custom QEMU binary")
+        cls.extra_qemu_options = cls.add_list_option("extra-options", metavar="QEMU_OPTIONS",
+                                                     help="Additional command line flags to pass to qemu-system")
+        cls.logfile = cls.add_optional_path_option("logfile", metavar="LOGFILE",
+                                                   help="The logfile that QEMU should use.")
+        cls.log_directory = cls.add_optional_path_option(
+            "log-directory", metavar="DIR",
+            help="If set QEMU will log to a timestamped file in this directory. "
+                 "Will be ignored if the 'logfile' option is set")
         cls.use_telnet = cls.add_config_option("monitor-over-telnet", kind=int, metavar="PORT", show_help=False,
                                                help="If set, the QEMU monitor will be reachable by connecting to "
                                                     "localhost at $PORT via telnet instead of using CTRL+A,C")
 
-        cls.custom_qemu_smb_mount = cls.add_path_option("smb-host-directory", default=None, metavar="DIR",
-                                                        help="If set QEMU will provide this directory over smb with "
-                                                             "the name //10.0.2.4/qemu for use with mount_smbfs")
-        cls.cvtrace = cls.add_bool_option("cvtrace", help="Use binary trace output instead of textual")
+        cls.custom_qemu_smb_mount = cls.add_optional_path_option(
+            "smb-host-directory", metavar="DIR",
+            help="If set QEMU will provide this directory over smb with the name //10.0.2.4/qemu for use with "
+                 "mount_smbfs")
         # TODO: -s will no longer work, not sure anyone uses it though
         if cls.forward_ssh_port:
             default_ssh_port_computed = ComputedDefaultValue(function=lambda p, _: default_ssh_port,
@@ -172,28 +181,30 @@ class LaunchQEMUBase(SimpleProject):
                                                             help="The port on localhost to forward to the QEMU ssh "
                                                                  "port. You can then use `ssh root@localhost -p $PORT` "
                                                                  "to connect to the VM")
-        cls.ephemeral = cls.add_bool_option("ephemeral", show_help=True,
-                                            help="Run qemu in 'snapshot' mode, changes to the disk image "
-                                                 "are non-persistent")
+        cls.ephemeral = False
+        if cls._uses_disk_image:
+            cls.ephemeral = cls.add_bool_option(
+                "ephemeral", show_help=True,
+                help="Run qemu in 'snapshot' mode, changes to the disk image are non-persistent")
 
         # TODO: add a shortcut for vnc?
-        cls.extra_tcp_forwarding = cls.add_config_option("extra-tcp-forwarding", kind=list, default=(),
-                                                         help="Additional TCP bridge ports beyond ssh/22; "
-                                                              "list of [hostip:]port=[guestip:]port")
+        cls.extra_tcp_forwarding = cls.add_list_option(
+            "extra-tcp-forwarding",
+            help="Additional TCP bridge ports beyond ssh/22; list of [hostip:]port=[guestip:]port")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.current_kernel = None  # type: typing.Optional[Path]
-        self.disk_image = None  # type: typing.Optional[Path]
+        self.current_kernel: Optional[Path] = None
+        self.disk_image: Optional[Path] = None
         self.disk_image_format = "raw"
         self._project_specific_options = []
         self.bios_flags = []
         self.qemu_options = QemuOptions(self.crosscompile_target, want_debugger=self.config.wait_for_debugger)
         self.qemu_user_networking = True
-        self.rootfs_path = None  # type:typing.Optional[Path]
+        self.rootfs_path: Optional[Path] = None
         self._after_disk_options = []
 
-    def get_riscv_bios_args(self) -> typing.List[str]:
+    def get_riscv_bios_args(self) -> "list[str]":
         # Explicit bios args no longer needed now that qemu defaults to a different file name for CHERI
         return riscv_bios_arguments(self.crosscompile_target, self)
 
@@ -248,7 +259,7 @@ class LaunchQEMUBase(SimpleProject):
             elif cls.use_qemu in (QEMUType.CHERI, QEMUType.MORELLO, QEMUType.UPSTREAM):
                 qemu_class = {
                     QEMUType.CHERI: BuildQEMU,
-                    QEMUType.UPSTREAM: BuildUpstreamQEMU
+                    QEMUType.UPSTREAM: BuildUpstreamQEMU,
                 }[cls.use_qemu]
                 if qemu_class not in supported_qemu_classes:
                     fatal_error("Cannot use", cls.use_qemu.value, "QEMU with target", xtarget.generic_target_suffix,
@@ -301,9 +312,9 @@ class LaunchQEMUBase(SimpleProject):
             uboot_xtarget = None
             if xtarget.cpu_architecture == CPUArchitecture.RISCV64:
                 if xtarget.is_hybrid_or_purecap_cheri():
-                    uboot_xtarget = CompilationTargets.BAREMETAL_NEWLIB_RISCV64_HYBRID
+                    uboot_xtarget = CompilationTargets.FREESTANDING_RISCV64_HYBRID
                 else:
-                    uboot_xtarget = CompilationTargets.BAREMETAL_NEWLIB_RISCV64
+                    uboot_xtarget = CompilationTargets.FREESTANDING_RISCV64
 
             if uboot_xtarget is not None:
                 qemu_loader_or_kernel = BuildUBoot.get_firmware_path(self, self.config, cross_target=uboot_xtarget)
@@ -384,11 +395,11 @@ class LaunchQEMUBase(SimpleProject):
                 if share_name is not None:
                     share_name_option = "<<<" + share_name
                 else:
-                    share_name = "qemu{}".format(smb_dir_count)
+                    share_name = f"qemu{smb_dir_count}"
                 user_network_options += str(directory) + share_name_option + ("@ro" if readonly else "")
                 guest_cmd = coloured(AnsiColour.yellow,
-                                     "mkdir -p {target} && mount_smbfs -I 10.0.2.4 -N //10.0.2.4/{share_name}"
-                                     " {target}".format(target=target, share_name=share_name))
+                                     f"mkdir -p {target} && mount_smbfs -I 10.0.2.4 -N //10.0.2.4/{share_name}"
+                                     f" {target}")
                 self.info("Providing ", coloured(AnsiColour.green, str(directory)),
                           coloured(AnsiColour.cyan, " over SMB to the guest. Use `"), guest_cmd,
                           coloured(AnsiColour.cyan, "` to mount it"), sep="")
@@ -450,13 +461,17 @@ class LaunchQEMUBase(SimpleProject):
                                                          add_virtio_rng=self._add_virtio_rng)
         qemu_command += self._project_specific_options + self._after_disk_options + monitor_options
         qemu_command += logfile_options + self.extra_qemu_options + virtfs_args
-        self.info("About to run QEMU with image", self.disk_image, "and loader/kernel", qemu_loader_or_kernel)
+        if self.disk_image is None:
+            assert not self._uses_disk_image, "No disk image, should not have --ephemeral flag"
+            self.info("About to run QEMU with loader/kernel", qemu_loader_or_kernel)
+        else:
+            self.info("About to run QEMU with image", self.disk_image, "and loader/kernel", qemu_loader_or_kernel)
 
         if self.config.wait_for_debugger or self.config.debugger_in_tmux_pane:
             gdb_socket_placeholder = find_free_port(preferred_port=1234)
             gdb_port = gdb_socket_placeholder.port if self.config.gdb_random_port else 1234
-            self.info("QEMU is waiting for GDB to attach (using `target remote :{}`)."
-                      " Once connected enter 'continue\\n' to continue booting".format(gdb_port))
+            self.info(f"QEMU is waiting for GDB to attach (using `target remote :{gdb_port}`)."
+                      " Once connected enter 'continue\\n' to continue booting")
 
             def gdb_command(main_binary, bp=None, extra_binary=None) -> str:
                 gdb_cmd = BuildGDB.get_install_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/gdb"
@@ -473,7 +488,7 @@ class LaunchQEMUBase(SimpleProject):
                 # Once the file has been loaded set a breakpoint on panic() and connect to the remote host
                 if bp:
                     result.append("--eval-command=break " + bp)
-                result.append("--eval-command=target remote localhost:{}".format(gdb_port))
+                result.append(f"--eval-command=target remote localhost:{gdb_port}")
                 result.append("--eval-command=continue")
                 if extra_binary:
                     result.append("--init-eval-command=add-symbol-file -o 0 " + str(extra_binary))
@@ -515,7 +530,7 @@ class LaunchQEMUBase(SimpleProject):
                 if len(sessions) != 1:
                     raise Exception("There should be only one tmux session running")
                 session = server.list_sessions()[0]
-                window = session.attached_window  # type: libtmux.Window
+                window: libtmux.Window = session.attached_window
                 pane = window.attached_pane
                 # Note: multiply by two since most monospace fonts are taller than wide
                 vertical = int(pane.height) * 2 > int(pane.width)
@@ -536,11 +551,11 @@ class LaunchQEMUBase(SimpleProject):
                 except ImportError:
                     self.info(coloured(AnsiColour.red, "libtmux not installed, impossible to automatically start gdb"))
                 except Exception as e:
-                    self.info(coloured(AnsiColour.red, "Unable to start gdb in tmux: {}".format(e)))
+                    self.info(coloured(AnsiColour.red, f"Unable to start gdb in tmux: {e}"))
 
             gdb_socket_placeholder.socket.close()  # the port is now available for qemu
-            qemu_command += ["-gdb", "tcp::{}".format(gdb_port),  # wait for gdb on localhost:1234
-                             "-S"  # freeze CPU at startup (use 'c' to start execution)
+            qemu_command += ["-gdb", f"tcp::{gdb_port}",  # wait for gdb on localhost:1234
+                             "-S",  # freeze CPU at startup (use 'c' to start execution)
                              ]
         # We want stdout/stderr here even when running with --quiet
         # FIXME: it seems like QEMU often breaks the line wrapping state: https://bugs.launchpad.net/qemu/+bug/1857449
@@ -574,10 +589,10 @@ class LaunchQEMUBase(SimpleProject):
 
 class AbstractLaunchFreeBSD(LaunchQEMUBase):
     do_not_add_to_targets = True
-    kernel_project: typing.Optional[BuildFreeBSD]
-    disk_image_project: typing.Optional[BuildDiskImageBase]
+    kernel_project: Optional[BuildFreeBSD]
+    disk_image_project: Optional[BuildDiskImageBase]
 
-    kernel_config: str
+    kernel_config: Optional[str]
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -595,12 +610,11 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
             kind=KernelABI, enum_choices=[KernelABI.HYBRID, KernelABI.PURECAP],
             help="Select extra kernel variant with the given ABI to run.")
 
-    def __init__(self, config: CheriConfig, *, freebsd_class: "typing.Type[BuildFreeBSD]" = None,
-                 disk_image_class: "typing.Type[BuildDiskImageBase]" = None, needs_disk_image=True, **kwargs):
+    def __init__(self, config: CheriConfig, *, freebsd_class: "Optional[type[BuildFreeBSD]]" = None,
+                 disk_image_class: "Optional[type[BuildDiskImageBase]]" = None, **kwargs):
         super().__init__(config, **kwargs)
         self.freebsd_class = freebsd_class
         self.disk_image_class = disk_image_class
-        self.needs_disk_image = needs_disk_image
 
     def setup(self) -> None:
         super().setup()
@@ -622,7 +636,7 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
             config_filters = {}
             if self.kernel_abi:
                 if self.crosscompile_target.is_hybrid_or_purecap_cheri():
-                    config_filters["kABI"] = self.kernel_abi
+                    config_filters["kernel_abi"] = self.kernel_abi
                 else:
                     self.warning("Can not select kernel ABI to run for non-CHERI target, ignoring --kernel-abi")
             self.kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, **config_filters)
@@ -633,7 +647,7 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
             if kern_module_path_arg:
                 self._project_specific_options += ["-append", kern_module_path_arg]
         self.rootfs_path = self.kernel_project.get_rootfs_dir(self)
-        if self.needs_disk_image:
+        if self._uses_disk_image:
             self.disk_image = self.disk_image_class.get_instance(self).disk_image_path
 
     def _valid_kernel_configs(self):
@@ -666,12 +680,12 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
 class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
     do_not_add_to_targets = True
     include_os_in_target_suffix = False
-    _freebsd_class: typing.Optional[BuildFreeBSD] = None
-    _disk_image_class: typing.Optional[BuildDiskImageBase] = None
+    _freebsd_class: Optional[BuildFreeBSD] = None
+    _disk_image_class: Optional[BuildDiskImageBase] = None
     kyua_test_files = ("/usr/tests/Kyuafile",)
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         if self._freebsd_class is not None:
             return self._freebsd_class.supported_architectures
         return self._disk_image_class.supported_architectures
@@ -692,29 +706,39 @@ class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
         return self._disk_image_class.default_architecture
 
     @classmethod
-    def dependencies(cls: "typing.Type[_RunMultiArchFreeBSDImage]", config: CheriConfig) -> "list[str]":
+    def dependencies(cls: "type[_RunMultiArchFreeBSDImage]", config: CheriConfig) -> "tuple[str, ...]":
         xtarget = cls.get_crosscompile_target()
-        result = []
+        result = tuple()
         chosen_qemu = cls.get_chosen_qemu(config)
         if chosen_qemu.cls:
-            result.append(chosen_qemu.cls.target)
+            result += (chosen_qemu.cls.target,)
         if cls._freebsd_class is not None:
-            result.append(cls._freebsd_class.get_class_for_target(xtarget).target)
+            result += (cls._freebsd_class.get_class_for_target(xtarget).target,)
         if cls._disk_image_class is not None:
-            result.append(cls._disk_image_class.get_class_for_target(xtarget).target)
+            result += (cls._disk_image_class.get_class_for_target(xtarget).target,)
         return result
 
-    def __init__(self, *args, needs_disk_image=True, **kwargs):
-        super().__init__(*args, needs_disk_image=needs_disk_image, freebsd_class=self._freebsd_class,
-                         disk_image_class=self._disk_image_class, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, freebsd_class=self._freebsd_class, disk_image_class=self._disk_image_class, **kwargs)
+
+    @property
+    def _extra_test_args(self) -> "list[str]":
+        return []
 
     def run_tests(self):
         rootfs_kernel_bootdir = None
         if not self.qemu_options.can_boot_kernel_directly:
             rootfs_kernel_bootdir = self.kernel_project.get_kern_module_path(self.kernel_config)
-        extra_args = []
+        extra_args = self._extra_test_args
         if self.kyua_test_files and "--kyua-tests-files" not in self.config.test_extra_args:
             extra_args.extend("--kyua-tests-files=" + x for x in self.kyua_test_files)
+        if not is_jenkins_build():
+            # Jenkins expects the test outputs to be saved to the CWD, otherwise we save them in the build root
+            tests_dir = self.config.build_root / "test-results" / self.target
+            self.makedirs(tests_dir)
+            extra_args.append(f"--test-output-dir={tests_dir}")
+        if self.kernel_abi is not None and self.crosscompile_target.is_hybrid_or_purecap_cheri():
+            extra_args.append(f"--expected-kernel-abi={self.kernel_abi.value}")
         self.target_info.run_cheribsd_test_script("run_cheribsd_tests.py", *extra_args,
                                                   disk_image_path=self.disk_image, kernel_path=self.current_kernel,
                                                   rootfs_alternate_kernel_dir=rootfs_kernel_bootdir)
@@ -737,19 +761,19 @@ class LaunchCheriBSD(_RunMultiArchFreeBSDImage):
             super().setup_config_options(default_ssh_port=get_default_ssh_forwarding_port(add_to_port), **kwargs)
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         result = super().dependencies(config)
         # RISCV needs OpenSBI/BBL to run:
         # Note: QEMU 4.2+ embeds opensbi, for CHERI, we have to use BBL (for now):
         if cls.get_crosscompile_target().is_hybrid_or_purecap_cheri([CPUArchitecture.RISCV64]):
-            result.append("bbl-baremetal-riscv64-purecap")
+            result += ("bbl-baremetal-riscv64-purecap",)
         return result
 
 
 class LaunchCheriOSQEMU(LaunchQEMUBase):
     target = "run-cherios"
-    dependencies = ["qemu", "cherios"]
-    supported_architectures = [CompilationTargets.CHERIOS_MIPS_PURECAP, CompilationTargets.CHERIOS_RISCV_PURECAP]
+    dependencies = ("qemu", "cherios")
+    supported_architectures = (CompilationTargets.CHERIOS_MIPS_PURECAP, CompilationTargets.CHERIOS_RISCV_PURECAP)
     forward_ssh_port = False
     qemu_user_networking = False
     hide_options_from_help = True
@@ -774,7 +798,7 @@ class LaunchCheriOSQEMU(LaunchQEMUBase):
             self._after_disk_options.extend([
                 "-netdev", "tap,id=tap0,ifname=cherios_tap,script=no,downscript=no",
                 "-device", "virtio-net-device,netdev=tap0",
-                ])
+            ])
 
         if cherios.smp_cores > 1:
             self._project_specific_options.append("-smp")
@@ -791,7 +815,7 @@ class LaunchCheriOSQEMU(LaunchQEMUBase):
                 self.run_cmd("dd", "if=/dev/zero", "of=" + str(self.disk_image), size_flag, "count=1")
         super().process()
 
-    def get_riscv_bios_args(self) -> typing.List[str]:
+    def get_riscv_bios_args(self) -> "list[str]":
         # CheriOS bundles its kernel with its own bootloader
         return ["-bios", "none"]
 
@@ -842,24 +866,25 @@ class LaunchMinimalCheriBSD(LaunchCheriBSD):
         add_to_port = cls.get_cross_target_index()
         super().setup_config_options(default_ssh_port=get_default_ssh_forwarding_port(20 + add_to_port), **kwargs)
 
-    def run_tests(self):
-        self.target_info.run_cheribsd_test_script("run_cheribsd_tests.py", "--minimal-image")
+    @property
+    def _extra_test_args(self) -> "list[str]":
+        return ["--minimal-image"]
 
 
 class LaunchCheriBsdMfsRoot(LaunchMinimalCheriBSD):
     target = "run-mfs-root"
     _freebsd_class = BuildCheriBsdMfsKernel
     _disk_image_class = None
+    _uses_disk_image = False
 
     # XXX: Existing code isn't reqdy to run these but we want to support building them
     @classproperty
-    def supported_architectures(self):
-        arches = super().supported_architectures
-        return list(set(arches) -
-                    set([CompilationTargets.CHERIBSD_AARCH64] + CompilationTargets.ALL_CHERIBSD_MORELLO_TARGETS))
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
+        return tuple(set(super().supported_architectures) -
+                     {CompilationTargets.CHERIBSD_AARCH64, *CompilationTargets.ALL_CHERIBSD_MORELLO_TARGETS})
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, needs_disk_image=False, **kwargs)
+        super().__init__(*args, **kwargs)
         if self.config.use_minimal_benchmark_kernel:
             kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, benchmark=True)
             self.current_kernel = self.kernel_project.get_kernel_install_path(kernel_config)
@@ -871,29 +896,29 @@ class LaunchCheriBsdMfsRoot(LaunchMinimalCheriBSD):
 class BuildAndRunCheriBSD(TargetAliasWithDependencies):
     target = "build-and-run-cheribsd"
     include_os_in_target_suffix = False
-    dependencies = ["cheribsd", "disk-image", "run"]
+    dependencies = ("cheribsd", "disk-image", "run")
     direct_dependencies_only = True  # only rebuild toolchain, bbl or GDB if --include-dependencies is passed
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return LaunchCheriBSD.supported_architectures
 
 
 class BuildAndRunFreeBSD(TargetAliasWithDependencies):
     target = "build-and-run-freebsd"
     include_os_in_target_suffix = False
-    dependencies = ["freebsd", "disk-image-freebsd", "run-freebsd"]
+    dependencies = ("freebsd", "disk-image-freebsd", "run-freebsd")
     direct_dependencies_only = True  # only rebuild toolchain, bbl or GDB if --include-dependencies is passed
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return LaunchFreeBSD.supported_architectures
 
 
 class BuildAll(TargetAliasWithDependencies):
     target = "all"
-    dependencies = ["qemu", "sdk", "disk-image", "run"]
+    dependencies = ("qemu", "sdk", "disk-image", "run")
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return LaunchCheriBSD.supported_architectures

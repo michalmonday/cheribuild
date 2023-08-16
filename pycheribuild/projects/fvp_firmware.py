@@ -27,13 +27,20 @@
 #
 import os
 import platform
+import shutil
 import tempfile
 from pathlib import Path
 
 from .cross.crosscompileproject import CrossCompileMakefileProject
 from .cross.gdb import BuildGDB
-from .project import (DefaultInstallDir, GitRepository, MakefileProject, Project, ComputedDefaultValue,
-                      ReuseOtherProjectDefaultTargetRepository)
+from .project import (
+    ComputedDefaultValue,
+    DefaultInstallDir,
+    GitRepository,
+    MakefileProject,
+    Project,
+    ReuseOtherProjectDefaultTargetRepository,
+)
 from .simple_project import SimpleProject
 from ..config.chericonfig import BuildType, CheriConfig
 from ..config.compilation_targets import CompilationTargets
@@ -81,7 +88,7 @@ class ArmNoneEabiToolchain(SimpleProject):
 
 class MorelloFirmwareBase(CrossCompileMakefileProject):
     do_not_add_to_targets = True
-    supported_architectures = [CompilationTargets.MORELLO_BAREMETAL_HYBRID]
+    supported_architectures = (CompilationTargets.FREESTANDING_MORELLO_HYBRID,)
     cross_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR  # TODO: install it
     needs_sysroot = False  # We don't need a complete sysroot
     default_build_type = BuildType.RELEASE
@@ -97,8 +104,8 @@ class BuildMorelloScpFirmware(MorelloFirmwareBase):
     repository = GitRepository("https://git.morello-project.org/morello/scp-firmware.git")
     target = "morello-scp-firmware"
     default_directory_basename = "morello-scp-firmware"
-    dependencies = ["arm-none-eabi-toolchain"]
-    supported_architectures = [CompilationTargets.ARM_NONE_EABI]
+    dependencies = ("arm-none-eabi-toolchain",)
+    supported_architectures = (CompilationTargets.ARM_NONE_EABI,)
     cross_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR
 
     @property
@@ -116,7 +123,7 @@ class BuildMorelloScpFirmware(MorelloFirmwareBase):
             AR=self.target_info.ar,
             OBJCOPY=self.CC.with_name(self.CC.name.replace("gcc", "objcopy")),
             SIZE=self.CC.with_name(self.CC.name.replace("gcc", "size")),
-            )
+        )
 
     def process(self):
         if not self.CC.exists():
@@ -226,7 +233,7 @@ class BuildMorelloUEFI(MorelloFirmwareBase):
         old_urls=[b"git@git.morello-project.org:morello/edk2-platforms.git",
                   b"git@git.morello-project.org:university-of-cambridge/edk2-platforms.git",
                   b"https://git.morello-project.org/university-of-cambridge/edk2-platforms.git"])
-    dependencies = ["gdb-native", "morello-acpica"]  # To get ld.bfd
+    dependencies = ("gdb-native", "morello-acpica")  # To get ld.bfd
     target = "morello-uefi"
     default_directory_basename = "morello-edk2"
     _extra_git_clean_excludes = ["--exclude=edk2-platforms"]  # Don't delete edk2-platforms, we do it manually
@@ -287,7 +294,8 @@ subprocess.check_call(["{real_clang}", "-B{fake_dir}"] + args + ["-fuse-ld=bfd",
         self.create_symlink(bfd_path, fake_compiler_dir / "ld", relative=False)
         self.create_symlink(bfd_path, fake_compiler_dir / "ld.bfd", relative=False)
         firmware_ver = self.run_cmd("git", "-C", self.source_dir, "rev-parse", "--short", "HEAD",
-                                    capture_output=True, run_in_pretend_mode=True).stdout.decode("utf-8").strip()
+                                    run_in_pretend_mode=shutil.which("git") is not None,
+                                    capture_output=True).stdout.decode("utf-8").strip()
         # if ! git diff-index --quiet HEAD --; then
         #   FIRMWARE_VER="${FIRMWARE_VER}-dirty"
         # fi
@@ -300,17 +308,15 @@ subprocess.check_call(["{real_clang}", "-B{fake_dir}"] + args + ["-fuse-ld=bfd",
             platform_desc = "Platform/ARM/Morello/MorelloPlatformFvp.dsc"
             if not (self.source_dir / "edk2-platforms" / platform_desc).exists():
                 self.fatal("Could not find", self.source_dir / "edk2-platforms" / platform_desc)
-            script = """
+            script = f"""
 . edksetup.sh --reconfig
 make -C BaseTools
-export PACKAGES_PATH=:{src}:{src}/edk2-platforms:
-export CLANG38_AARCH64_PREFIX={toolchain_bin}/llvm-
-export CLANG38_BIN={toolchain_bin}/
-build -n {make_jobs} -a AARCH64 -t CLANG38 -p {platform_desc} \
-    -b {build_mode} -s -D EDK2_OUT_DIR=Build/morellofvp -D PLAT_TYPE_FVP \
-    -D ENABLE_MORELLO_CAP -D FIRMWARE_VER={firmware_ver}""".format(
-                src=self.source_dir, make_jobs=self.config.make_jobs, build_mode=self.build_mode,
-                firmware_ver=firmware_ver, toolchain_bin=fake_compiler_dir, platform_desc=platform_desc)
+export PACKAGES_PATH=:{self.source_dir}:{self.source_dir}/edk2-platforms:
+export CLANG38_AARCH64_PREFIX={fake_compiler_dir}/llvm-
+export CLANG38_BIN={fake_compiler_dir}/
+build -n {self.config.make_jobs} -a AARCH64 -t CLANG38 -p {platform_desc} \
+    -b {self.build_mode} -s -D EDK2_OUT_DIR=Build/morellofvp -D PLAT_TYPE_FVP \
+    -D ENABLE_MORELLO_CAP -D FIRMWARE_VER={firmware_ver}"""
             self.run_shell_script(script, shell="bash", cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -319,12 +325,12 @@ build -n {make_jobs} -a AARCH64 -t CLANG38 -p {platform_desc} \
 
     @classmethod
     def uefi_bin(cls, caller):
-        return cls.get_install_dir(caller, cross_target=CompilationTargets.MORELLO_BAREMETAL_HYBRID) / "uefi.bin"
+        return cls.get_install_dir(caller, cross_target=CompilationTargets.FREESTANDING_MORELLO_HYBRID) / "uefi.bin"
 
 
 class BuildMorelloFlashImages(Project):
     target = "morello-flash-images"
-    dependencies = ["morello-scp-firmware", "morello-trusted-firmware"]
+    dependencies = ("morello-scp-firmware", "morello-trusted-firmware")
     _default_install_dir_fn = ComputedDefaultValue(function=_morello_firmware_build_outputs_dir,
                                                    as_string="$MORELLO_SDK_ROOT/fvp-firmware/morello/build-outputs")
     repository = ReuseOtherProjectDefaultTargetRepository(source_project=BuildMorelloScpFirmware)
@@ -356,12 +362,12 @@ class BuildMorelloFirmware(SimpleProject):
     skip_toolchain_dependencies = True  # Don't rebuild morello-llvm unless it's also a depenency of another target
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         # Note: can't make this a per-target option (using setup_config_options) since dependencies() is called before
         # we have loaded the per-target config options.
         if config.build_morello_firmware_from_source:
-            return ["morello-scp-firmware", "morello-trusted-firmware", "morello-flash-images", "morello-uefi"]
-        return []
+            return ("morello-scp-firmware", "morello-trusted-firmware", "morello-flash-images", "morello-uefi")
+        return tuple()
 
     def process(self):
         if self.config.build_morello_firmware_from_source:

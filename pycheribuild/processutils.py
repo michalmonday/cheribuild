@@ -47,9 +47,10 @@ import termios
 import typing
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import Callable, Optional, Union
 
 from .colour import AnsiColour, coloured
-from .utils import (ConfigBase, fatal_error, get_global_config, OSInfo, status_update, Type_T, warning_message)
+from .utils import ConfigBase, OSInfo, Type_T, fatal_error, get_global_config, status_update, warning_message
 
 __all__ = ["print_command", "get_compiler_info", "CompilerInfo", "popen", "popen_handle_noexec",  # no-combine
            "run_command", "latest_system_clang_tool", "commandline_to_str", "set_env", "extract_version",  # no-combine
@@ -67,7 +68,7 @@ def __filter_env(env: "dict[str, str]") -> "dict[str, str]":
 
 
 @contextlib.contextmanager
-def set_env(*, print_verbose_only=True, config: ConfigBase = None, **environ):
+def set_env(*, print_verbose_only=True, config: ConfigBase, **environ):
     """
     Temporarily set the process environment variables.
 
@@ -79,10 +80,8 @@ def set_env(*, print_verbose_only=True, config: ConfigBase = None, **environ):
     False
 
     """
-    changed_values: dict[str, typing.Optional[str]] = dict()
+    changed_values: dict[str, Optional[str]] = dict()
     if environ:
-        if config is None:
-            config = get_global_config()  # TODO: remove
         should_print_update = not print_verbose_only or config.verbose
         for k, v in environ.items():
             # make sure all environment variables are converted to string
@@ -194,7 +193,7 @@ def suppress_sigttou(suppress=True):
 
 
 @contextlib.contextmanager
-def keep_terminal_sane(gave_tty_control=False, command: list = None):
+def keep_terminal_sane(gave_tty_control=False, command: Optional[list] = None):
     # Programs such as QEMU can change the terminal state and if they don't exit cleanly this state is
     # propagated to the shell that invoked cheribuild.
     # This function attempts to restore the stdin/stdout/stderr state in those cases:
@@ -213,15 +212,15 @@ def keep_terminal_sane(gave_tty_control=False, command: list = None):
             stderr_state.restore()
 
 
-def print_command(arg1: "typing.Union[str, typing.Sequence[typing.Any]]", *remaining_args, output_file=None,
+def print_command(arg1: "Union[str, typing.Sequence[typing.Any]]", *remaining_args, output_file=None,
                   colour=AnsiColour.yellow, cwd=None, env=None, sep=" ", print_verbose_only=False,
-                  config: ConfigBase = None, **kwargs):
+                  config: Optional[ConfigBase] = None, **kwargs):
     if config is None:
         config = get_global_config()  # TODO: remove
     if config.quiet or (print_verbose_only and not config.verbose):
         return
     # also allow passing a single string
-    if not type(arg1) is str:
+    if not isinstance(arg1, str):
         all_args = arg1
         arg1 = all_args[0]
         remaining_args = all_args[1:]
@@ -233,7 +232,7 @@ def print_command(arg1: "typing.Union[str, typing.Sequence[typing.Any]]", *remai
             envvars = coloured(AnsiColour.cyan, commandline_to_str(k + "=" + str(v) for k, v in new_env_vars.items()))
             prefix += ("env", envvars)
     # comma in tuple is required otherwise it creates a tuple of string chars
-    new_args = (shlex.quote(str(arg1)),) + tuple(map(shlex.quote, map(str, remaining_args)))
+    new_args = (shlex.quote(str(arg1)), *tuple(map(shlex.quote, map(str, remaining_args))))
     if output_file:
         new_args += (">", str(output_file))
     # Avoid a space before the actual command if there is no prefic:
@@ -243,7 +242,7 @@ def print_command(arg1: "typing.Union[str, typing.Sequence[typing.Any]]", *remai
         print(coloured(colour, prefix, sep=sep), coloured(colour, new_args, sep=sep), flush=True, **kwargs)
 
 
-def get_interpreter(cmdline: "typing.Sequence[str]") -> "typing.Optional[typing.List[str]]":
+def get_interpreter(cmdline: "typing.Sequence[str]") -> "Optional[list[str]]":
     """
     :param cmdline: The command to check
     :return: The interpreter command if the executable does not have execute permissions
@@ -270,7 +269,7 @@ def _make_called_process_error(retcode, args, *, stdout=None, stderr=None, cwd=N
     return err
 
 
-def check_call_handle_noexec(cmdline: "typing.List[str]", **kwargs):
+def check_call_handle_noexec(cmdline: "list[str]", **kwargs):
     try:
         with keep_terminal_sane(command=cmdline):
             return subprocess.check_call(cmdline, **kwargs)
@@ -279,21 +278,25 @@ def check_call_handle_noexec(cmdline: "typing.List[str]", **kwargs):
         if interpreter:
             with keep_terminal_sane(command=cmdline):
                 return subprocess.check_call(interpreter + cmdline, **kwargs)
-        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None), stderr=str(e).encode("utf-8"))
+        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None),
+                                         stderr=str(e).encode("utf-8")) from e
     except FileNotFoundError as e:
-        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None), stderr=str(e).encode("utf-8"))
+        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None),
+                                         stderr=str(e).encode("utf-8")) from e
 
 
-def popen_handle_noexec(cmdline: "typing.List[str]", **kwargs) -> subprocess.Popen:
+def popen_handle_noexec(cmdline: "list[str]", **kwargs) -> subprocess.Popen:
     try:
         return subprocess.Popen(cmdline, **kwargs)
     except PermissionError as e:
         interpreter = get_interpreter(cmdline)
         if interpreter:
             return subprocess.Popen(interpreter + cmdline, **kwargs)
-        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None), stderr=str(e).encode("utf-8"))
+        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None),
+                                         stderr=str(e).encode("utf-8")) from e
     except FileNotFoundError as e:
-        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None), stderr=str(e).encode("utf-8"))
+        raise _make_called_process_error(e.errno, cmdline, cwd=kwargs.get("cwd", None),
+                                         stderr=str(e).encode("utf-8")) from e
 
 
 @contextlib.contextmanager
@@ -337,8 +340,8 @@ class FakePopen:
         pass
 
     @staticmethod
-    def poll() -> int:
-        return 0
+    def poll() -> Optional[int]:
+        return None
 
     def __enter__(self) -> "FakePopen":
         return self
@@ -347,7 +350,7 @@ class FakePopen:
         pass
 
 
-def popen(cmdline, print_verbose_only=False, run_in_pretend_mode=False, *, config: ConfigBase = None,
+def popen(cmdline, print_verbose_only=False, run_in_pretend_mode=False, *, config: Optional[ConfigBase] = None,
           **kwargs) -> subprocess.Popen:
     if config is None:
         config = get_global_config()  # TODO: remove
@@ -360,10 +363,11 @@ def popen(cmdline, print_verbose_only=False, run_in_pretend_mode=False, *, confi
 
 
 # noinspection PyShadowingBuiltins
-def run_command(*args, capture_output=False, capture_error=False, input: "typing.Union[str, bytes]" = None,
+def run_command(*args, capture_output=False, capture_error=False, input: "Optional[Union[str, bytes]]" = None,
                 timeout=None, print_verbose_only=False, run_in_pretend_mode=False, raise_in_pretend_mode=False,
                 no_print=False, replace_env=False, give_tty_control=False, expected_exit_code=0,
-                allow_unexpected_returncode=False, config: ConfigBase = None, **kwargs) -> "CompletedProcess[bytes]":
+                allow_unexpected_returncode=False, config: Optional[ConfigBase] = None,
+                env: "Optional[dict[str, str]]" = None, **kwargs) -> "CompletedProcess[bytes]":
     if config is None:
         config = get_global_config()  # TODO: remove
     if len(args) == 1 and isinstance(args[0], (list, tuple)):
@@ -401,19 +405,17 @@ def run_command(*args, capture_output=False, capture_error=False, input: "typing
     elif config.quiet and "stdout" not in kwargs:
         kwargs["stdout"] = subprocess.DEVNULL
 
-    if "env" in kwargs:
-        env_arg = kwargs["env"]  # type: typing.Dict[str, str]
+    if env is not None:
+        env_arg: "dict[str, str]" = {k: str(v) for k, v in env.items()}  # make sure everything is a string
         if not replace_env:
             new_env = os.environ.copy()
-            env = {k: str(v) for k, v in env_arg.items()}  # make sure everything is a string
-            new_env.update(env)
-            kwargs["env"] = new_env
-        else:
-            kwargs["env"] = dict((k, str(v)) for k, v in env_arg.items())
+            new_env.update(env_arg)
+            env_arg = new_env
+        kwargs["env"] = env_arg
     if give_tty_control:
         kwargs["preexec_fn"] = _new_tty_foreground_process_group
-    stdout: bytes = b""
-    stderr: bytes = b""
+    stdout: Union[str, bytes] = b""
+    stderr: Union[str, bytes] = b""
     # Some programs (such as QEMU) can mess up the TTY state if they don't exit cleanly
     with keep_terminal_sane(give_tty_control, command=cmdline):
         with popen_handle_noexec(cmdline, **kwargs) as process:
@@ -427,15 +429,17 @@ def run_command(*args, capture_output=False, capture_error=False, input: "typing
                 stdout, stderr = process.communicate()
                 assert timeout is not None
                 exc = subprocess.TimeoutExpired(process.args, timeout, output=stdout, stderr=stderr)
-            except BrokenPipeError:
+            except BrokenPipeError as e:
                 # just return the exit code
                 process.kill()
                 retcode = process.wait()
                 exc = _make_called_process_error(retcode, process.args, stdout=b"", cwd=kwargs["cwd"])
+                exc.__cause__ = e
             except Exception as e:
                 process.kill()
                 process.wait()
                 exc = e
+                exc.__cause__ = e
             retcode = process.poll()
             if retcode != expected_exit_code and not allow_unexpected_returncode:
                 exc = _make_called_process_error(retcode, process.args, stdout=stdout, stderr=stderr, cwd=kwargs["cwd"])
@@ -463,11 +467,11 @@ def _quote(s) -> str:
     return str(s) if isinstance(s, DoNotQuoteStr) else shlex.quote(str(s))
 
 
-def commandline_to_str(args: "typing.Iterable[typing.Union[str,Path]]") -> str:
-    return " ".join((_quote(s) for s in args))
+def commandline_to_str(args: "typing.Iterable[Union[str,Path]]") -> str:
+    return " ".join(_quote(s) for s in args)
 
 
-class CompilerInfo(object):
+class CompilerInfo:
     def __init__(self, path: Path, compiler: str, version: "tuple[int, ...]", version_str: str, default_target: str,
                  *, config: ConfigBase):
         self.path = path
@@ -476,7 +480,7 @@ class CompilerInfo(object):
         self.version_str = version_str
         self.default_target = default_target
         self.config = config
-        self._resource_dir: "typing.Optional[Path]" = None
+        self._resource_dir: "Optional[Path]" = None
         self._supported_warning_flags: "dict[str, bool]" = {}
         self._supported_sanitizer_flags: "dict[tuple[str, tuple[str]], bool]" = {}
         self._include_dirs: "dict[tuple[str], list[Path]]" = {}
@@ -545,7 +549,7 @@ class CompilerInfo(object):
         if result is None:
             assert sanitzer_flag.startswith("-fsanitize")
             result = self._supports_flag(sanitzer_flag,
-                                         arch_flags + ["-c", "-xc", "/dev/null", "-Werror", "-o", "/dev/null"])
+                                         [*arch_flags, "-c", "-xc", "/dev/null", "-Werror", "-o", "/dev/null"])
             self._supported_sanitizer_flags[(sanitzer_flag, tuple(arch_flags))] = result
         return result
 
@@ -557,7 +561,8 @@ class CompilerInfo(object):
             self._supported_warning_flags[flag] = result
         return result
 
-    def supports_Og_flag(self) -> bool:
+    # noinspection PyPep8Naming
+    def supports_Og_flag(self) -> bool:  # noqa: N802
         if self.compiler == "gcc" and self.version > (4, 8, 0):
             return True
         if self.compiler == "clang" and self.version > (4, 0, 0):
@@ -566,7 +571,7 @@ class CompilerInfo(object):
             return True  # assume version is new enough to be based on clang 4
         return False
 
-    def linker_override_flags(self, linker: Path, linker_type: str = None) -> "list[str]":
+    def linker_override_flags(self, linker: Path, linker_type: "Optional[str]" = None) -> "list[str]":
         if not self.is_clang:
             # GCC only allows you to set the linker type, and doesn't allow absolute paths.
             warning_message("Cannot set absolute path to linker", linker, "when compiling with", self.path)
@@ -586,7 +591,7 @@ class CompilerInfo(object):
         result.append("--ld-path=" + str(linker))
         return result
 
-    def get_matching_binutil(self, binutil) -> typing.Optional[Path]:
+    def get_matching_binutil(self, binutil) -> Optional[Path]:
         assert self.is_clang
         name = self.path.name
         version_suffix = ""
@@ -625,7 +630,7 @@ class CompilerInfo(object):
 _cached_compiler_infos: "dict[Path, CompilerInfo]" = {}
 
 
-def get_compiler_info(compiler: "typing.Union[str, Path]", *, config: ConfigBase) -> CompilerInfo:
+def get_compiler_info(compiler: "Union[str, Path]", *, config: ConfigBase) -> CompilerInfo:
     assert compiler is not None
     compiler = Path(compiler)
     if not compiler.is_absolute():
@@ -698,21 +703,23 @@ def get_compiler_info(compiler: "typing.Union[str, Path]", *, config: ConfigBase
 
 # Cache the versions
 @functools.lru_cache(maxsize=20)
-def get_version_output(program: Path, command_args: tuple = None, *, config: ConfigBase = None) -> "bytes":
+def get_version_output(program: Path, command_args: Optional[tuple] = None, *,
+                       config: Optional[ConfigBase] = None) -> "bytes":
     if config is None:
         config = get_global_config()  # TODO: remove
     if command_args is None:
         command_args = ["--version"]
     if program == Path():
         raise ValueError("Empty path?")
-    prog = run_command([str(program)] + list(command_args), config=config, stdin=subprocess.DEVNULL,
+    prog = run_command([str(program), *list(command_args)], config=config, stdin=subprocess.DEVNULL,
                        stderr=subprocess.STDOUT, capture_output=True, run_in_pretend_mode=True)
     return prog.stdout
 
 
 @functools.lru_cache(maxsize=20)
-def get_program_version(program: Path, command_args: tuple = None, component_kind: "type[Type_T]" = int,
-                        regex=None, program_name: bytes = None, *, config: ConfigBase) -> "tuple[Type_T, ...]":
+def get_program_version(program: Path, command_args: Optional[tuple] = None, component_kind: "type[Type_T]" = int,
+                        regex=None, program_name: Optional[bytes] = None, *,
+                        config: ConfigBase) -> "tuple[Type_T, ...]":
     if config is None:
         config = get_global_config()  # TODO: remove
     if program_name is None:
@@ -720,13 +727,13 @@ def get_program_version(program: Path, command_args: tuple = None, component_kin
     try:
         stdout = get_version_output(program, command_args=command_args, config=config)
     except subprocess.CalledProcessError as e:
-        fatal_error("Failed to determine version for", program, ":", e)
+        fatal_error("Failed to determine version for", program, ":", e, pretend=config.pretend)
         return 0, 0, 0
     return extract_version(stdout, component_kind, regex, program_name)
 
 
 # extract the version component from program output such as "git version 2.7.4"
-def extract_version(output: bytes, component_kind: "type[Type_T]" = int, regex: "typing.Pattern" = None,
+def extract_version(output: bytes, component_kind: "type[Type_T]" = int, regex: "Optional[typing.Pattern]" = None,
                     program_name: bytes = b"") -> "tuple[Type_T, ...]":
     if regex is None:
         prefix = re.escape(program_name) + b" " if program_name else b""
@@ -761,7 +768,7 @@ def ssh_host_accessible(host: str) -> bool:
 
 
 def latest_system_clang_tool(config: ConfigBase, basename: str,
-                             fallback_basename: "typing.Optional[str]") -> typing.Optional[Path]:
+                             fallback_basename: "Optional[str]") -> Optional[Path]:
     if "_ARGCOMPLETE" in os.environ:  # Avoid expensive lookup when tab-completing
         return None if fallback_basename is None else Path(fallback_basename)
 
@@ -800,7 +807,7 @@ def latest_system_clang_tool(config: ConfigBase, basename: str,
     return newest[0]
 
 
-def run_and_kill_children_on_exit(fn: "typing.Callable[[], typing.Any]"):
+def run_and_kill_children_on_exit(fn: "Callable[[], typing.Any]"):
     error = False
     try:
         opgrp = os.getpgrp()
@@ -828,7 +835,7 @@ def run_and_kill_children_on_exit(fn: "typing.Callable[[], typing.Any]"):
             raise err
         else:
             fatal_error("Command ", "`" + commandline_to_str(err.cmd) + "` failed with non-zero exit code ",
-                        err.returncode, *extra_msg, fatal_when_pretending=True, sep="", exit_code=err.returncode)
+                        err.returncode, *extra_msg, sep="", exit_code=err.returncode, pretend=False)
     finally:
         if error:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)

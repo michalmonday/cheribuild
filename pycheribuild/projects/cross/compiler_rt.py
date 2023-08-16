@@ -32,7 +32,7 @@ from pathlib import Path
 
 from .crosscompileproject import CompilationTargets, CrossCompileCMakeProject, DefaultInstallDir
 from .llvm import BuildCheriLLVM, BuildUpstreamLLVM
-from ..project import ReuseOtherProjectDefaultTargetRepository, Linkage
+from ..project import Linkage, ReuseOtherProjectDefaultTargetRepository
 from ...config.target_info import CPUArchitecture
 from ...utils import classproperty, is_jenkins_build
 
@@ -42,14 +42,19 @@ class BuildCompilerRt(CrossCompileCMakeProject):
     llvm_project = BuildCheriLLVM
     repository = ReuseOtherProjectDefaultTargetRepository(llvm_project, subdirectory="compiler-rt")
     target = "compiler-rt"
-    default_install_dir = DefaultInstallDir.COMPILER_RESOURCE_DIR
+    native_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR
+    cross_install_dir = DefaultInstallDir.IN_BUILD_DIRECTORY
     _check_install_dir_conflict = False
-    supported_architectures = \
-        CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_HOST_TARGETS + \
-        CompilationTargets.ALL_SUPPORTED_BAREMETAL_TARGETS + \
-        CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS
+    supported_architectures = (
+        *CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_BAREMETAL_AND_HOST_TARGETS,
+        *CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS,
+    )
 
     def setup(self):
+        # For the NATIVE variant we want to install to the compiler resource dir:
+        if self.compiling_for_host():
+            cc = self.llvm_project.get_native_install_path(self.config) / "bin/clang"
+            self._install_dir = self.get_compiler_info(cc).get_resource_dir()
         super().setup()
         if self.target_info.is_rtems() or self.target_info.is_baremetal():
             self.add_cmake_options(CMAKE_TRY_COMPILE_TARGET_TYPE="STATIC_LIBRARY")  # RTEMS only needs static libs
@@ -58,7 +63,8 @@ class BuildCompilerRt(CrossCompileCMakeProject):
         if is_jenkins_build():
             llvm_tools_bindir = self.llvm_project.get_native_install_path(self.config) / "bin"
         else:
-            llvm_tools_bindir = self.llvm_project.get_build_dir(self, cross_target=CompilationTargets.NATIVE) / "bin"
+            llvm_tools_bindir = self.llvm_project.get_build_dir(
+                self, cross_target=CompilationTargets.NATIVE_NON_PURECAP) / "bin"
         self.add_cmake_options(
             LLVM_CONFIG_PATH=llvm_tools_bindir / "llvm-config",
             LLVM_EXTERNAL_LIT=llvm_tools_bindir / "llvm-lit",
@@ -108,9 +114,8 @@ class BuildUpstreamCompilerRt(BuildCompilerRt):
     llvm_project = BuildUpstreamLLVM
     repository = ReuseOtherProjectDefaultTargetRepository(llvm_project, subdirectory="compiler-rt")
     target = "upstream-compiler-rt"
-    # TODO: default_install_dir = DefaultInstallDir.COMPILER_RESOURCE_DIR
     default_install_dir = DefaultInstallDir.IN_BUILD_DIRECTORY
-    supported_architectures = [CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.NATIVE,)
 
 
 class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
@@ -122,8 +127,10 @@ class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
     is_sdk_target = True
     root_cmakelists_subdirectory = Path("lib/builtins")
     needs_sysroot = False  # We don't need a complete sysroot
-    supported_architectures = \
-        CompilationTargets.ALL_SUPPORTED_BAREMETAL_TARGETS + CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS
+    supported_architectures = (CompilationTargets.ALL_SUPPORTED_BAREMETAL_TARGETS +
+                               CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS +
+                               CompilationTargets.ALL_FREESTANDING_TARGETS +
+                               CompilationTargets.ALL_NATIVE)
 
     # Note: needs to be @classproperty since it is called before __init__
     @classproperty
@@ -135,7 +142,7 @@ class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
             # Conflicting file names for RISC-V non-CHERI,hybrid, and purecap -> install to prefixed directory
             # instead of the compiler resource directory
             return DefaultInstallDir.ROOTFS_LOCALBASE
-        return DefaultInstallDir.COMPILER_RESOURCE_DIR
+        return DefaultInstallDir.IN_BUILD_DIRECTORY
 
     def linkage(self):
         # The default value of STATIC (for baremetal targets) would add additional flags that are not be needed
@@ -146,7 +153,7 @@ class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
 
     def setup(self):
         super().setup()
-        assert self.target_info.is_baremetal() or self.target_info.is_rtems(), "No other targets supported yet"
+        assert self.target_info.is_baremetal() or self.target_info.is_rtems() or self.target_info.is_native()
         # self.COMMON_FLAGS.append("-v")
         self.COMMON_FLAGS.append("-ffreestanding")
         if self.compiling_for_mips(include_purecap=False):
@@ -155,23 +162,14 @@ class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
         if self.target_info.is_rtems() or self.target_info.is_baremetal():
             self.add_cmake_options(CMAKE_TRY_COMPILE_TARGET_TYPE="STATIC_LIBRARY")  # RTEMS only needs static libs
 
+        # Set some variables to allow building without llvm-config:
+        self.add_cmake_options(LLVM_CONFIG_PATH="NOTFOUND", CMAKE_DISABLE_FIND_PACKAGE_LLVM=True)
         self.add_cmake_options(
-            LLVM_CONFIG_PATH=self.sdk_bindir / "llvm-config" if is_jenkins_build() and not self.compiling_for_host()
-            else
-            self.llvm_project.get_build_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/llvm-config",
-            LLVM_EXTERNAL_LIT=self.sdk_bindir / "llvm-lit" if is_jenkins_build() and not self.compiling_for_host() else
-            self.llvm_project.get_build_dir(self, cross_target=CompilationTargets.NATIVE) / "bin/llvm-lit",
-            COMPILER_RT_BUILD_BUILTINS=True,
-            COMPILER_RT_BUILD_SANITIZERS=False,
-            COMPILER_RT_BUILD_XRAY=False,
-            COMPILER_RT_BUILD_LIBFUZZER=False,
-            COMPILER_RT_BUILD_PROFILE=False,
             COMPILER_RT_EXCLUDE_ATOMIC_BUILTIN=False,
             COMPILER_RT_BAREMETAL_BUILD=self.target_info.is_baremetal(),
-            COMPILER_RT_DEFAULT_TARGET_ONLY=True,
-            # BUILTIN_SUPPORTED_ARCH="mips64",
-            TARGET_TRIPLE=self.target_info.target_triple,
-            )
+        )
+        if not self.compiling_for_host():
+            self.add_cmake_options(COMPILER_RT_DEFAULT_TARGET_ONLY=True, TARGET_TRIPLE=self.target_info.target_triple)
         if self.target_info.is_baremetal():
             self.add_cmake_options(COMPILER_RT_OS_DIR="baremetal")
         if self.should_include_debug_info:
@@ -179,7 +177,6 @@ class BuildCompilerRtBuiltins(CrossCompileCMakeProject):
 
     def install(self, **kwargs):
         super().install(**kwargs)
-
         libname = "libclang_rt.builtins-" + self.triple_arch + ".a"
         if self.target_info.is_rtems():
             self.move_file(self.install_dir / "lib/rtems5" / libname, self.install_dir / "lib" / libname)

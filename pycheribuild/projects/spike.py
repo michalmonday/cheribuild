@@ -57,8 +57,8 @@ class BuildCheriSpike(AutotoolsProject):
         self.configure_args.append("--disable-rvfi-dii")
         # We have to pass LDFLAGS as part of CC/CXX since the build system is dumb.
         common_flags = self.default_compiler_flags + self.default_ldflags
-        self.configure_environment["CC"] = self.commandline_to_str([str(self.CC)] + common_flags + self.CFLAGS)
-        self.configure_environment["CXX"] = self.commandline_to_str([str(self.CXX)] + common_flags + self.CXXFLAGS)
+        self.configure_environment["CC"] = self.commandline_to_str([str(self.CC), *common_flags, *self.CFLAGS])
+        self.configure_environment["CXX"] = self.commandline_to_str([str(self.CXX), *common_flags, *self.CXXFLAGS])
 
     @classmethod
     def get_simulator_binary(cls, caller):
@@ -67,13 +67,13 @@ class BuildCheriSpike(AutotoolsProject):
 
 class RunCheriSpikeBase(SimpleProject):
     do_not_add_to_targets = True
-    _bbl_xtarget = CompilationTargets.BAREMETAL_NEWLIB_RISCV64_PURECAP
+    _bbl_xtarget = CompilationTargets.FREESTANDING_RISCV64_PURECAP
     _bbl_class = BuildBBLNoPayload.get_class_for_target(_bbl_xtarget)
     _source_class = None
 
     @classmethod
-    def dependencies(cls, _: CheriConfig) -> "list[str]":
-        return [cls._source_class.target, cls._bbl_class.target, BuildCheriSpike.target]
+    def dependencies(cls, _: CheriConfig) -> "tuple[str, ...]":
+        return cls._source_class.target, cls._bbl_class.target, BuildCheriSpike.target
 
     def process(self):
         kernel_project = self._source_class.get_instance(self)
@@ -88,5 +88,5 @@ class RunCheriSpikeBase(SimpleProject):
 class RunCheriBsdSpike(RunCheriSpikeBase):
     target = "run-spike"
     _source_class = BuildCheriBsdMfsKernel
-    supported_architectures = [CompilationTargets.CHERIBSD_RISCV_PURECAP, CompilationTargets.CHERIBSD_RISCV_NO_CHERI,
-                               CompilationTargets.CHERIBSD_RISCV_HYBRID]
+    supported_architectures = (CompilationTargets.CHERIBSD_RISCV_PURECAP, CompilationTargets.CHERIBSD_RISCV_NO_CHERI,
+                               CompilationTargets.CHERIBSD_RISCV_HYBRID)

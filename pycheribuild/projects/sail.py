@@ -36,10 +36,10 @@ from subprocess import CalledProcessError
 from typing import Any, Dict, Tuple, Union
 
 from .project import AutotoolsProject, DefaultInstallDir, GitRepository, MakeCommandKind, Project
-from .simple_project import SimpleProject
+from .simple_project import BoolConfigOption, SimpleProject
 from ..processutils import get_program_version
 from ..targets import target_manager
-from ..utils import AnsiColour, coloured, OSInfo, ThreadJoiner
+from ..utils import AnsiColour, OSInfo, ThreadJoiner, coloured
 
 if typing.TYPE_CHECKING:
     _MixinBase = Project
@@ -52,7 +52,7 @@ class OpamMixin(_MixinBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.required_ocaml_version = "4.11.1"
+        self.required_ocaml_version = "4.13.1"
         self.__using_correct_switch = False
         self.__ignore_switch_version = False
 
@@ -79,7 +79,7 @@ class OpamMixin(_MixinBase):
         return shutil.which("opam") or "opam"
 
     def _opam_cmd(self, command, *args, _add_switch=True):
-        cmdline = [self.opam_binary, command, "--root=" + str(self.opamroot)]
+        cmdline = [self.opam_binary, command, "--cli=2.1", "--root=" + str(self.opamroot)]
         if _add_switch:
             cmdline.append("--switch=" + self.required_ocaml_version)
         cmdline.extend(args)
@@ -125,8 +125,8 @@ class OpamMixin(_MixinBase):
         if Path(self.opam_binary).is_absolute():
             opam_env["OPAM_USER_PATH_RO"] = Path(self.opam_binary).parent
         if not (self.opamroot / "opam-init").exists():
-            self.run_cmd(self.opam_binary, "init", "--disable-sandboxing", "--root=" + str(self.opamroot), "--no-setup",
-                         cwd="/", env=opam_env)
+            self.run_cmd(self.opam_binary, "init", "--cli=2.1", "--disable-sandboxing", "--root=" + str(self.opamroot),
+                         "--no-setup", cwd="/", env=opam_env)
         return opam_env, cwd
 
     def run_in_ocaml_env(self, command: str, cwd=None, print_verbose_only=False, **kwargs):
@@ -139,7 +139,7 @@ class OpamMixin(_MixinBase):
         opam_env, cwd = self._run_in_ocaml_env_prepare(cwd=cwd)
         # for opam commands we don't need to prepend opam exec --
         if command[0] != self.opam_binary:
-            command = [self.opam_binary, "exec", "--root=" + str(self.opamroot), "--"] + command
+            command = [self.opam_binary, "--cli=2.1", "exec", "--root=" + str(self.opamroot), "--", *command]
         assert isinstance(self, SimpleProject)
         return self.run_cmd(command, cwd=cwd, print_verbose_only=print_verbose_only, env=opam_env, **kwargs)
 
@@ -185,31 +185,24 @@ class ProjectUsingOpam(OpamMixin, Project):
     do_not_add_to_targets = True
 
 
-REMS_OPAM_REPO = "https://github.com/rems-project/opam-repository.git"
-
-
 class BuildSailFromOpam(ProjectUsingOpam):
     target = "sail"
     repository = GitRepository("https://github.com/rems-project/sail", default_branch="sail2")
     native_install_dir = DefaultInstallDir.CHERI_SDK
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
+    use_git_version = BoolConfigOption("use-git-version",
+                                       help="Install sail from github instead of using the latest released version")
 
     def check_system_dependencies(self):
         super().check_system_dependencies()
         self.check_required_system_tool("z3", homebrew="z3 --without-python@2 --with-python")
 
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(**kwargs)
-        cls.use_git_version = cls.add_bool_option("use-git-version", show_help=False,
-                                                  help="Install sail from github instead of using the latest released "
-                                                       "version")
-
     def clean(self) -> ThreadJoiner:
         return ThreadJoiner(None)
 
     def update(self):
+        self.run_opam_cmd("update")
         if not self.use_git_version:
             return
         super().update()
@@ -218,24 +211,20 @@ class BuildSailFromOpam(ProjectUsingOpam):
         pass
 
     def install(self, **kwargs):
-        # self.run_command_in_ocaml_env(["env"])
-        repos = self.run_opam_cmd("repository", "list", capture_output=True)
-        if REMS_OPAM_REPO not in repos.stdout.decode("utf-8"):
-            self.run_opam_cmd("repository", "add", "rems", REMS_OPAM_REPO)
-        else:
-            self.info("REMS opam repo already added")
-
-        if not self.skip_update:
-            self.run_opam_cmd("update")
-
         destdir_flag = "--destdir=" + str(self.install_dir / "sailprefix")
         # Remove the old sail installation
         self.run_opam_cmd("uninstall", "--verbose", "sail", destdir_flag)
         self.run_opam_cmd("uninstall", "--verbose", "sail")
-
+        # Remove libsail+other subpackages for sail 0.15+
+        self.run_opam_cmd("uninstall", "--verbose", "libsail", destdir_flag)
+        self.run_opam_cmd("uninstall", "-y", "--verbose", "libsail", ignore_errors=True)
         # ensure sail isn't pinned
         self.run_opam_cmd("pin", "remove", "sail", "--no-action")
-        install_flags = ["-y", "--verbose", "--working-dir", "--keep-build-dir", "--with-test", destdir_flag]
+
+        if not self.skip_update:
+            self.run_opam_cmd("update")
+
+        install_flags = ["-y", "--verbose", "--keep-build-dir", "--with-test", destdir_flag]
         if not self.with_clean:
             install_flags.append("--reuse-build-dir")
         if self.use_git_version:
@@ -253,27 +242,24 @@ target_manager.add_target_alias("sail-from-opam", "sail", deprecated=True)
 class BuildSailCheriMips(ProjectUsingOpam):
     target = "sail-cheri-mips"
     repository = GitRepository("https://github.com/CTSRD-CHERI/sail-cheri-mips")
-    dependencies = ["sail"]
+    dependencies = ("sail",)
     native_install_dir = DefaultInstallDir.CHERI_SDK
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
+    with_trace_support = BoolConfigOption(
+        "trace-support",
+        help="Build sail-cheri-mips simulators with tracing support (slow, but useful to debug failing tests)",
+    )
 
     def check_system_dependencies(self):
         super().check_system_dependencies()
         self.check_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
 
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(**kwargs)
-        cls.with_trace_support = cls.add_bool_option(
-            "trace-support", show_help=False,
-            help="Build sail-cheri-mips simulators with tracing support (slow, but useful to debug failing tests)")
-
     def compile(self, **kwargs):
         if self.with_trace_support:
             self.make_args.set(TRACE="yes")
-        cmd = [self.make_args.command, self.config.make_j_flag,
-               "all"] + self.make_args.all_commandline_args(self.config)
+        cmd = [self.make_args.command, self.config.make_j_flag, "all",
+               *self.make_args.all_commandline_args(self.config)]
         self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -284,12 +270,12 @@ class BuildSailCheriMips(ProjectUsingOpam):
 class RunSailShell(OpamMixin, SimpleProject):
     target = "sail-env"
     repository = GitRepository("https://github.com/CTSRD-CHERI/sail-cheri-mips")
-    dependencies = ["sail"]
+    dependencies = ("sail",)
     native_install_dir = DefaultInstallDir.CHERI_SDK
 
     def process(self):
         shell = os.getenv("SHELL", "bash")
-        self.info("Starting sail shell (using {})... ".format(shell))
+        self.info(f"Starting sail shell (using {shell})... ")
         import subprocess
         try:
             prompt_env = {}
@@ -300,8 +286,8 @@ class RunSailShell(OpamMixin, SimpleProject):
             else:
                 # Otherwise set the VIRTUAL_ENV environment variable if not already present (this should hopefully
                 # be visualized by many custom shell prompts)
-                prompt_env["VIRTUAL_ENV"] = os.getenv("VIRTUAL_ENV", "sail-opam-env"),
-            with self.set_env(PATH=str(self.config.cheri_sdk_bindir) + ":" + os.getenv("PATH", ""), **prompt_env):
+                prompt_env["VIRTUAL_ENV"] = os.getenv("VIRTUAL_ENV", "sail-opam-env")
+            with self.set_env(**prompt_env):
                 self.run_command_in_ocaml_env(
                     [shell, "-c", f"echo 'Entering sail environment, send CTRL+D to exit'; exec {shell} -i"],
                     cwd=os.getcwd())
@@ -314,7 +300,7 @@ class RunSailShell(OpamMixin, SimpleProject):
 class BuildSailRISCV(ProjectUsingOpam):
     target = "sail-riscv"
     repository = GitRepository("https://github.com/rems-project/sail-riscv")
-    dependencies = ["sail"]
+    dependencies = ("sail",)
     native_install_dir = DefaultInstallDir.CHERI_SDK
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
@@ -325,8 +311,8 @@ class BuildSailRISCV(ProjectUsingOpam):
 
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
-            cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch,
-                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args(self.config)
+            cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch, "csim", "osim", "rvfi",
+                   *self.make_args.all_commandline_args(self.config)]
             self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
@@ -338,7 +324,7 @@ class BuildSailRISCV(ProjectUsingOpam):
 class BuildSailCheriRISCV(ProjectUsingOpam):
     target = "sail-cheri-riscv"
     repository = GitRepository("https://github.com/CTSRD-CHERI/sail-cheri-riscv")
-    dependencies = ["sail"]
+    dependencies = ("sail",)
     native_install_dir = DefaultInstallDir.CHERI_SDK
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
@@ -349,11 +335,29 @@ class BuildSailCheriRISCV(ProjectUsingOpam):
 
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
-            cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch,
-                   "csim", "osim", "rvfi"] + self.make_args.all_commandline_args(self.config)
+            cmd = [self.make_args.command, self.config.make_j_flag, "ARCH=" + arch, "csim", "osim", "rvfi",
+                   *self.make_args.all_commandline_args(self.config)]
             self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)
 
     def install(self, **kwargs):
         self.make_args.set(INSTALL_DIR=self.config.cheri_sdk_dir)
         # self.run_make_install()
         self.info("NO INSTALL TARGET YET")
+
+
+class BuildSailMorello(ProjectUsingOpam):
+    target = "sail-morello"
+    repository = GitRepository("https://github.com/CTSRD-CHERI/sail-morello")
+    dependencies = ("sail",)
+    native_install_dir = DefaultInstallDir.DO_NOT_INSTALL
+    build_in_source_dir = True  # Cannot build out-of-source
+    make_kind = MakeCommandKind.GnuMake
+
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
+        self.check_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
+
+    def compile(self, **kwargs):
+        cmd = [self.make_args.command, self.config.make_j_flag, "gen_c", "check_sail",
+               *self.make_args.all_commandline_args(self.config)]
+        self.run_command_in_ocaml_env(cmd, cwd=self.source_dir)

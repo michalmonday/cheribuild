@@ -29,7 +29,7 @@
 #
 from .cmake_project import CMakeProject
 from .cross.llvm import BuildLLVMSplitRepoBase
-from .project import GitRepository, ComputedDefaultValue
+from .project import ComputedDefaultValue, GitRepository
 
 install_to_soaap_dir = ComputedDefaultValue(function=lambda config, project: config.output_root / "soaap",
                                             as_string="$INSTALL_ROOT/soaap")
@@ -52,7 +52,7 @@ class BuildSoaapLLVM(BuildLLVMSplitRepoBase):
 
 
 class BuildSoaap(CMakeProject):
-    dependencies = ["soaap-llvm"]
+    dependencies = ("soaap-llvm",)
     repository = GitRepository("https://github.com/CTSRD-SOAAP/soaap")
     _default_install_dir_fn = install_to_soaap_dir
 

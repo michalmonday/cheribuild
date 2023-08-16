@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 #
 # Copyright (c) 2020 Alex Richardson
+# Copyright (c) 2023 Arm Limited and/or its affiliates <open-source-office@arm.com>
 #
 # This work was supported by Innovate UK project 105694, "Digital Security by
 # Design (DSbD) Technology Platform Prototype".
@@ -33,15 +34,16 @@ import tempfile
 import typing
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import Optional
 
 from .disk_image import BuildCheriBSDDiskImage, BuildDiskImageBase, BuildFreeBSDImage
 from .fvp_firmware import BuildMorelloFlashImages, BuildMorelloScpFirmware, BuildMorelloUEFI
-from .simple_project import SimpleProject
+from .simple_project import BoolConfigOption, IntConfigOption, SimpleProject
 from ..config.chericonfig import CheriConfig, ComputedDefaultValue
 from ..config.compilation_targets import CompilationTargets
+from ..config.target_info import CrossCompileTarget
 from ..processutils import extract_version, popen
-from ..utils import (AnsiColour, cached_property, classproperty, coloured, fatal_error, find_free_port, OSInfo,
-                     SocketAndPort)
+from ..utils import AnsiColour, OSInfo, SocketAndPort, cached_property, classproperty, coloured, find_free_port
 
 
 class InstallMorelloFVP(SimpleProject):
@@ -54,6 +56,10 @@ class InstallMorelloFVP(SimpleProject):
     # Seems like docker containers don't get the full amount configured in the settings so subtract a bit from 5GB/8GB
     min_ram_mb = 4900
     warn_ram_mb = 7900
+    # We can run the FVP on macOS by using docker. FreeBSD might be able to use Linux emulation.
+    use_docker_container = BoolConfigOption("use-docker-container", default=OSInfo.IS_MAC,
+                                            help="Run the FVP inside a docker container")
+    i_agree_to_the_contained_eula = BoolConfigOption("agree-to-the-contained-eula", help="Accept the EULA")
 
     def check_system_dependencies(self) -> None:
         super().check_system_dependencies()
@@ -66,11 +72,8 @@ class InstallMorelloFVP(SimpleProject):
     @classmethod
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
-        cls.installer_path = cls.add_path_option("installer-path", help="Path to the FVP installer.sh or installer.tgz")
-        # We can run the FVP on macOS by using docker. FreeBSD might be able to use Linux emulation.
-        cls.use_docker_container = cls.add_bool_option("use-docker-container", default=OSInfo.IS_MAC,
-                                                       help="Run the FVP inside a docker container")
-        cls.i_agree_to_the_contained_eula = cls.add_bool_option("agree-to-the-contained-eula")
+        cls.installer_path = cls.add_optional_path_option("installer-path",
+                                                          help="Path to the FVP installer.sh or installer.tgz")
 
     @property
     def install_dir(self):
@@ -123,31 +126,31 @@ class InstallMorelloFVP(SimpleProject):
             # to avoid prompts from the installer)
             self.clean_directory(self.install_dir, ensure_dir_exists=False)
             # Even when using docker, we extract on the host first to show the EULA and install the documentation
-            self.run_cmd([installer_sh, "--destination", self.install_dir] + eula_args,
+            self.run_cmd([installer_sh, "--destination", self.install_dir, *eula_args],
                          print_verbose_only=False)
             if self.use_docker_container:
                 if installer_sh.parent != Path(td):
                     self.install_file(installer_sh, Path(td, installer_sh.name))
                 # When building the docker container we have to pass --i-agree-to-the-contained-eula since it does
                 # not seem possible to allow interactive prompts
-                self.write_file(Path(td, "Dockerfile"), contents="""
+                self.write_file(Path(td, "Dockerfile"), contents=f"""
 FROM opensuse/leap:15.2
 RUN zypper in -y xterm gzip tar libdbus-1-3 libatomic1 telnet socat
-COPY {installer_name} .
-RUN ./{installer_name} --i-agree-to-the-contained-eula --no-interactive --destination=/opt/FVP_Morello && \
-    rm ./{installer_name}
+COPY {installer_sh.name} .
+RUN ./{installer_sh.name} --i-agree-to-the-contained-eula --no-interactive --destination=/opt/FVP_Morello && \
+    rm ./{installer_sh.name}
 # Run as non-root user to allow X11 to work
 RUN useradd fvp-user
 USER fvp-user
 VOLUME /diskimg
-""".format(installer_name=installer_sh.name), overwrite=True)
+""", overwrite=True)
                 build_flags = []
                 if not self.config.skip_update:
                     build_flags.append("--pull")
                 if self.with_clean:
                     build_flags.append("--no-cache")
                 image_latest = self.container_name + ":latest"
-                self.run_cmd(["docker", "build"] + build_flags + ["-t", image_latest, "."], cwd=td,
+                self.run_cmd(["docker", "build", *build_flags, "-t", image_latest, "."], cwd=td,
                              print_verbose_only=False)
                 # get the version from the newly-built image (don't use the cached_property)
                 version = self._get_version(docker_image=image_latest, result_if_invalid=None)
@@ -173,8 +176,8 @@ VOLUME /diskimg
         else:
             return [], self.install_dir / model_relpath
 
-    def execute_fvp(self, args: list, disk_image_path: Path = None, firmware_path: Path = None, x11=True,
-                    tcp_ports: "typing.List[int]" = None, interactive=True, **kwargs) -> CompletedProcess:
+    def execute_fvp(self, args: list, disk_image_path: "Optional[Path]" = None, firmware_path: "Optional[Path]" = None,
+                    x11=True, tcp_ports: "Optional[list[int]]" = None, interactive=True, **kwargs) -> CompletedProcess:
         if tcp_ports is None:
             tcp_ports = []
         display = os.getenv("DISPLAY", None)
@@ -230,7 +233,7 @@ VOLUME /diskimg
             extra_args = []
 
             def fvp_cmdline():
-                return pre_cmd + [fvp_path] + self._plugin_args() + args + extra_args
+                return [*pre_cmd, fvp_path, *self._plugin_args(), *args, *extra_args]
 
             if not interactive_headless:
                 return self.run_cmd(fvp_cmdline(), **kwargs)
@@ -275,7 +278,7 @@ VOLUME /diskimg
                 # Linuxulator wants to make the write point at /tmp inside the
                 # compat chroot, so just use an anonymous pipe and hope Arm
                 # never break passing file descriptors through.
-                ap_servsock = None  # type: typing.Optional[SocketAndPort]
+                ap_servsock: Optional[SocketAndPort] = None
                 try:
                     fvp_kwargs = {}
                     if self.use_docker_container:
@@ -289,12 +292,12 @@ VOLUME /diskimg
 
                         def get_ap_port():
                             (ap_sock, _) = ap_servsock.socket.accept()
-                            with open(ap_sock.fileno(), 'r') as f:
+                            with open(ap_sock.fileno()) as f:
                                 # Check the port in the container is the
                                 # expected default.
                                 port = int(f.readline())
                                 if port != default_ap_port:
-                                    fatal_error("Unexpected port " + str(port) + " used by FVP in container")
+                                    self.fatal("Unexpected port " + str(port) + " used by FVP in container")
                                 return docker_host_ap_port
                     else:
                         ap_pipe_rfd, ap_pipe_wfd = os.pipe()
@@ -304,7 +307,7 @@ VOLUME /diskimg
                         fvp_kwargs['pass_fds'] = [ap_pipe_wfd]
 
                         def get_ap_port():
-                            with open(ap_pipe_rfd, 'r') as f:
+                            with open(ap_pipe_rfd) as f:
                                 return int(f.readline())
 
                     # Pass os.setsid to create a new process group so signals
@@ -373,7 +376,7 @@ VOLUME /diskimg
     def _get_version(self, docker_image=None, *, result_if_invalid) -> "tuple[int, ...]":
         pre_cmd, fvp_path = self._fvp_base_command(need_tty=False, docker_image=docker_image)
         try:
-            version_out = self.run_cmd(pre_cmd + [fvp_path, "--version"], capture_output=True, run_in_pretend_mode=True)
+            version_out = self.run_cmd([*pre_cmd, fvp_path, "--version"], capture_output=True, run_in_pretend_mode=True)
             result = extract_version(version_out.stdout,
                                      regex=re.compile(rb"Fast Models \[(\d+)\.(\d+)\.?(\d+)? \(.+\)]"))
             self.info("Morello FVP version detected as", result)
@@ -430,17 +433,22 @@ VOLUME /diskimg
         self.execute_fvp(["--cyclelimit", "1000"], x11=False, interactive=False)
 
 
+def _default_fvp_ssh_port():
+    # chose a different port for each user (hopefully it isn't in use yet)
+    return 12345 + ((os.getuid() - 1000) % 10000)
+
+
 class LaunchFVPBase(SimpleProject):
     do_not_add_to_targets = True
-    _source_class = None  # type: BuildDiskImageBase
+    _source_class: typing.ClassVar[BuildDiskImageBase] = None
     required_fvp_version = (0, 11, 19)
 
     @classmethod
-    def dependencies(cls, _: CheriConfig) -> "list[str]":
-        return ["install-morello-fvp", cls._source_class.target, "morello-firmware"]
+    def dependencies(cls, _: CheriConfig) -> "tuple[str, ...]":
+        return "install-morello-fvp", cls._source_class.target, "morello-firmware"
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return self._source_class.supported_architectures
 
     def __init__(self, *args, **kwargs):
@@ -453,10 +461,14 @@ class LaunchFVPBase(SimpleProject):
         if not self.use_architectureal_fvp:
             self.fvp_project = InstallMorelloFVP.get_instance(self, cross_target=CompilationTargets.NATIVE)
 
-    @staticmethod
-    def default_ssh_port():
-        # chose a different port for each user (hopefully it isn't in use yet)
-        return 12345 + ((os.getuid() - 1000) % 10000)
+    ssh_port = IntConfigOption("ssh-port", default=_default_fvp_ssh_port(), help="SSH port to use to connect to guest")
+    force_headless = BoolConfigOption("force-headless", default=False, help="Force headless use of the FVP")
+    # Allow using the architectural FVP:
+    use_architectureal_fvp = BoolConfigOption("use-architectural-fvp",
+                                              help="Use the architectural FVP that requires a license.")
+    fvp_trace_unbuffered = BoolConfigOption("trace-unbuffered", help="Don't buffer FVP trace output")
+    fvp_trace_mmu = BoolConfigOption("trace-mmu", default=False, help="Emit FVP MMU trace events")
+    smp = BoolConfigOption("smp", help="Simulate multiple CPU cores in the FVP", default=True)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -469,21 +481,14 @@ class LaunchFVPBase(SimpleProject):
         cls.remote_disk_image_path = cls.add_config_option("remote-disk-image-path",
                                                            help="When set rsync will be used to update the image from "
                                                                 "the remote server prior to running it.")
-        cls.ssh_port = cls.add_config_option("ssh-port", default=cls.default_ssh_port(), kind=int)
-        cls.extra_tcp_forwarding: "list[str]" = cls.add_config_option(
-            "extra-tcp-forwarding", kind=list, default=[],
+        cls.extra_tcp_forwarding = cls.add_list_option(
+            "extra-tcp-forwarding",
             help="Additional TCP bridge ports beyond ssh/22; list of [hostip:]port=[guestip:]port")
-        # Allow using the architectural FVP:
-        cls.use_architectureal_fvp = cls.add_bool_option("use-architectural-fvp",
-                                                         help="Use the architectural FVP that requires a license.")
         cls.license_server = cls.add_config_option("license-server", help="License server to use for the model")
         cls.arch_model_path = cls.add_path_option("simulator-path", help="Path to the FVP Model",
-                                                  default="/usr/local/FVP_Base_RevC-Rainier")
-        cls.smp = cls.add_bool_option("smp", help="Simulate multiple CPU cores in the FVP", default=True)
-        cls.force_headless = cls.add_bool_option("force-headless", default=False,
-                                                 help="Force headless use of the FVP")
-        cls.fvp_trace = cls.add_path_option("trace", help="Enable FVP tracing plugin to output to the given file")
-        cls.fvp_trace_mmu = cls.add_bool_option("trace-mmu", default=False, help="Emit FVP MMU trace events")
+                                                  default=Path("/usr/local/FVP_Base_RevC-Rainier"))
+        cls.fvp_trace = cls.add_optional_path_option("trace",
+                                                     help="Enable FVP tracing plugin to output to the given file")
         cls.fvp_trace_icount = cls.add_config_option("trace-start-icount",
                                                      help="Instruction count from which to start Tarmac trace")
 
@@ -520,7 +525,7 @@ class LaunchFVPBase(SimpleProject):
 
         add_hostbridge_params(
             "userNetworking=true",
-            "userNetPorts=" + ",".join([str(self.ssh_port) + "=22"] + self.extra_tcp_forwarding))
+            "userNetPorts=" + ",".join([str(self.ssh_port) + "=22", *self.extra_tcp_forwarding]))
 
         # NB: Set transport even if virtio_net is disabled since it still shows
         # up and is detected, just doesn't have any queues.
@@ -557,7 +562,7 @@ class LaunchFVPBase(SimpleProject):
                     "bp.secureflashloader.fname=" + str(bl1_bin),
                 ]
                 fvp_args = [x for param in model_params for x in ("-C", param)]
-                self.run_cmd([sim_binary, "--plugin", plugin, "--print-port-number"] + fvp_args)
+                self.run_cmd([sim_binary, "--plugin", plugin, "--print-port-number", *fvp_args])
         else:
             if self.fvp_project.fvp_revision < self.required_fvp_version:
                 self.dependency_error("FVP is too old, please update to the latest version",
@@ -633,12 +638,12 @@ class LaunchFVPBase(SimpleProject):
                     "--allow-debug-plugin",
                     "--plugin", self.fvp_project.plugin_dir / "GDBRemoteConnection.so",
                     "-C", "REMOTE_CONNECTION.GDBRemoteConnection.listen_address=127.0.0.1",
-                    "-C", "REMOTE_CONNECTION.GDBRemoteConnection.port={}".format(gdb_port)]
+                    "-C", f"REMOTE_CONNECTION.GDBRemoteConnection.port={gdb_port}"]
 
             if self.fvp_trace:
                 fvp_args += [
                     "--plugin", self.fvp_project.plugin_dir / "TarmacTrace.so",
-                    "-C", "TRACE.TarmacTrace.trace-file={}".format(self.fvp_trace),
+                    "-C", f"TRACE.TarmacTrace.trace-file={self.fvp_trace}",
                     "-C", "TRACE.TarmacTrace.quantum-size=0x1",
                     "-C", "TRACE.TarmacTrace.trace_mmu={}".format("true" if self.fvp_trace_mmu else "false"),
                     "-C", "TRACE.TarmacTrace.trace_loads_stores=false",
@@ -662,10 +667,12 @@ class LaunchFVPBase(SimpleProject):
                     "-C", "css.cluster0.cpu0.trace_special_hlt_imm16=0xbeef",
                     "-C", "css.cluster0.cpu1.trace_special_hlt_imm16=0xbeef",
                     "-C", "css.cluster1.cpu0.trace_special_hlt_imm16=0xbeef",
-                    "-C", "css.cluster1.cpu1.trace_special_hlt_imm16=0xbeef"
+                    "-C", "css.cluster1.cpu1.trace_special_hlt_imm16=0xbeef",
                 ]
+                if self.fvp_trace_unbuffered:
+                    fvp_args += ["-C", "TRACE.TarmacTrace.unbuffered=true"]
                 if self.fvp_trace_icount:
-                    fvp_args += ["-C", "TRACE.TarmacTrace.start-instruction-count={}".format(self.fvp_trace_icount)]
+                    fvp_args += ["-C", f"TRACE.TarmacTrace.start-instruction-count={self.fvp_trace_icount}"]
 
             # Update the Generic Timer counter at a real-time base frequency instead of simulator time
             # This should fix the extremely slow countdown in the loader (30 minutes instead of 10s) and might also
@@ -705,10 +712,10 @@ class LaunchFVPBase(SimpleProject):
 class LaunchFVPCheriBSD(LaunchFVPBase):
     target = "run-fvp"
     _source_class = BuildCheriBSDDiskImage
-    supported_architectures = [CompilationTargets.CHERIBSD_MORELLO_HYBRID, CompilationTargets.CHERIBSD_MORELLO_PURECAP]
+    supported_architectures = (CompilationTargets.CHERIBSD_MORELLO_HYBRID, CompilationTargets.CHERIBSD_MORELLO_PURECAP)
 
 
 class LaunchFVPFreeBsd(LaunchFVPBase):
     target = "run-fvp-freebsd"
     _source_class = BuildFreeBSDImage
-    supported_architectures = [CompilationTargets.FREEBSD_AARCH64]
+    supported_architectures = (CompilationTargets.FREEBSD_AARCH64,)

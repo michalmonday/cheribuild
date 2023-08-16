@@ -30,16 +30,15 @@
 import argparse
 import os
 import sys
-from enum import Enum
 from pathlib import Path
 
-from .chericonfig import CheriConfig
+from .chericonfig import CheribuildActionEnum, CheriConfig
 from .config_loader_base import ComputedDefaultValue, ConfigLoaderBase
 from .loader import JsonAndCommandLineConfigLoader, argcomplete
 from ..utils import default_make_jobs_count
 
 
-class CheribuildAction(Enum):
+class CheribuildAction(CheribuildActionEnum):
     BUILD = ("--build", "Run (usually build+install) chosen targets (default)")
     TEST = ("--test", "Run tests for the passed targets instead of building them", "--run-tests")
     BENCHMARK = ("--benchmark", "Run tests for the passed targets instead of building them")
@@ -103,6 +102,11 @@ class DefaultCheriConfig(CheriConfig):
             "confirm-clone", help="Ask for confirmation before cloning repositories.")
         self.force_update = loader.add_bool_option("force-update", help="Always update (with autostash) even if there "
                                                                         "are uncommitted changes")
+
+        self.presume_connectivity = loader.add_bool_option(
+            "presume-connectivity",
+            help="Do not probe for network connectivity and just assume that we are suitably connected")
+
         # TODO: should replace this group with a tristate value
         configure_group = loader.add_mutually_exclusive_group()
         self.skip_configure = loader.add_bool_option("skip-configure", help="Skip the configure step",
@@ -173,7 +177,7 @@ class DefaultCheriConfig(CheriConfig):
         self.morello_sdk_dir = loader.add_path_option("morello-sdk-root",
                                                       default=default_morello_sdk, group=loader.path_group,
                                                       help="The directory to find/install the Morello SDK")
-        self.sysroot_output_root = loader.add_path_option("sysroot-install-root", "-sysroot-install-dir",
+        self.sysroot_output_root = loader.add_path_option("sysroot-install-root", shortname="-sysroot-install-dir",
                                                           default=lambda p, cls: p.tools_root, group=loader.path_group,
                                                           help="Sysroot prefix (default: '<TOOLS_ROOT>')")
 

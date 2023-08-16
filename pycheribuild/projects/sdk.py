@@ -31,11 +31,11 @@ import datetime
 import os
 import subprocess
 
-from .cross.cheribsd import BuildCHERIBSD
 from .cmake_project import CMakeProject
+from .cross.cheribsd import BuildCHERIBSD
 from .project import CheriConfig, CPUArchitecture, DefaultInstallDir, GitRepository
 from .simple_project import SimpleProject, TargetAliasWithDependencies
-from ..targets import target_manager
+from ..config.target_info import CrossCompileTarget
 from ..utils import classproperty, include_local_file
 
 
@@ -44,25 +44,25 @@ class BuildCheriBSDSdk(TargetAliasWithDependencies):
     is_sdk_target = True
 
     @classmethod
-    def dependencies(cls, _: CheriConfig) -> "list[str]":
+    def dependencies(cls, _: CheriConfig) -> "tuple[str, ...]":
         if cls.get_crosscompile_target().is_hybrid_or_purecap_cheri([CPUArchitecture.AARCH64]):
-            deps = ["freestanding-morello-sdk"]
+            deps = ("freestanding-morello-sdk",)
         else:
-            deps = ["freestanding-cheri-sdk"]
-        return deps + ["cheribsd"]
+            deps = ("freestanding-cheri-sdk",)
+        return (*deps, "cheribsd")
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return BuildCHERIBSD.supported_architectures
 
 
 class BuildSdk(TargetAliasWithDependencies):
     target = "sdk"
-    dependencies = ["cheribsd-sdk"]
+    dependencies = ("cheribsd-sdk",)
     is_sdk_target = True
 
     @classproperty
-    def supported_architectures(self):
+    def supported_architectures(self) -> "tuple[CrossCompileTarget, ...]":
         return BuildCheriBSDSdk.supported_architectures
 
 
@@ -74,7 +74,7 @@ class BuildCheriCompressedCaps(CMakeProject):
 
 class BuildFreestandingSdk(SimpleProject):
     target = "freestanding-cheri-sdk"
-    dependencies = ["llvm-native", "qemu", "gdb-native"]
+    dependencies = ("llvm-native", "qemu", "gdb-native")
     dependencies_must_be_built = True
     is_sdk_target = True
 
@@ -103,13 +103,9 @@ class BuildFreestandingSdk(SimpleProject):
 
 class BuildFreestandingMorelloSdk(TargetAliasWithDependencies):
     target = "freestanding-morello-sdk"
-    dependencies = ["morello-llvm-native", "qemu"]  # "morello-gdb-native" does not exist
+    dependencies = ("morello-llvm-native", "qemu")  # "morello-gdb-native" does not exist
     dependencies_must_be_built = True
     is_sdk_target = True
-
-
-# Binutils now just builds LLVM since we don't need GNU binutils or Elftoolchain any more
-target_manager.add_target_alias("binutils", "llvm-native")
 
 
 class StartCheriSDKShell(SimpleProject):

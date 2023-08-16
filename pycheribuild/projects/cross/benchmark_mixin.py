@@ -37,7 +37,7 @@ from .crosscompileproject import CompilationTargets
 from ..project import Project
 from ...config.chericonfig import BuildType
 from ...processutils import commandline_to_str
-from ...utils import find_free_port, SocketAndPort
+from ...utils import SocketAndPort, find_free_port
 
 if typing.TYPE_CHECKING:
     _BenchmarkMixinBase = Project
@@ -47,8 +47,8 @@ else:
 
 # We also build benchmarks for hybrid to see whether those compilation flags change the results
 class BenchmarkMixin(_BenchmarkMixinBase):
-    supported_architectures = CompilationTargets.ALL_CHERIBSD_TARGETS_WITH_HYBRID_FOR_PURECAP_ROOTFS + [
-        CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.ALL_CHERIBSD_TARGETS_WITH_HYBRID_FOR_PURECAP_ROOTFS +
+                               CompilationTargets.ALL_NATIVE)
     default_build_type = BuildType.RELEASE
     prefer_full_lto_over_thin_lto = True
 
@@ -58,8 +58,10 @@ class BenchmarkMixin(_BenchmarkMixinBase):
             return ["-O3"]
         return super().optimization_flags
 
-    def run_fpga_benchmark(self, benchmarks_dir: Path, *, output_file: str = None, benchmark_script: str = None,
-                           benchmark_script_args: list = None, extra_runbench_args: list = None):
+    def run_fpga_benchmark(self, benchmarks_dir: Path, *, output_file: "Optional[str]" = None,
+                           benchmark_script: "Optional[str]" = None,
+                           benchmark_script_args: "Optional[list[str]]" = None,
+                           extra_runbench_args: "Optional[list[str]]" = None):
         assert benchmarks_dir is not None
         assert output_file is not None, "output_file must be set to a valid value"
         xtarget = self.crosscompile_target
@@ -93,13 +95,16 @@ class BenchmarkMixin(_BenchmarkMixinBase):
         if self.config.benchmark_ld_preload:
             runbench_args.append("--extra-input-files=" + str(self.config.benchmark_ld_preload))
             if xtarget.is_cheri_purecap() and not xtarget.get_rootfs_target().is_cheri_purecap():
-                env_var = "LD_CHERI_PRELOAD"
+                env_var = "LD_64C_PRELOAD"
             elif not xtarget.is_cheri_purecap() and xtarget.get_rootfs_target().is_cheri_purecap():
                 env_var = "LD_64_PRELOAD"
             else:
                 env_var = "LD_PRELOAD"
             pre_cmd = "export {}={};".format(env_var,
                                              shlex.quote("/tmp/benchdir/" + self.config.benchmark_ld_preload.name))
+            if env_var == "LD_64C_PRELOAD":
+                pre_cmd += "export {}={};".format("LD_CHERI_PRELOAD",
+                                                  shlex.quote("/tmp/benchdir/" + self.config.benchmark_ld_preload.name))
             runbench_args.append("--pre-command=" + pre_cmd)
         if self.config.benchmark_fpga_extra_args:
             basic_args.extend(self.config.benchmark_fpga_extra_args)
@@ -140,5 +145,5 @@ class BenchmarkMixin(_BenchmarkMixinBase):
             if qemu_ssh_socket is not None:
                 qemu_ssh_socket.socket.close()
         self.run_cmd(
-            [str(cheribuild_path / "vcu118-bsd-boot.py")] + basic_args + ["-vvvvv", "runbench"] + runbench_args,
+            [str(cheribuild_path / "vcu118-bsd-boot.py"), *basic_args, "-vvvvv", "runbench", *runbench_args],
             give_tty_control=True)

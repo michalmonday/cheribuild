@@ -27,12 +27,10 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-import os
-import shutil
 import typing
-from pathlib import Path
 
 from .project import AutotoolsProject, DefaultInstallDir, GitRepository
+from .simple_project import BoolConfigOption
 
 
 class BuildGnuBinutils(AutotoolsProject):
@@ -40,12 +38,8 @@ class BuildGnuBinutils(AutotoolsProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/binutils.git", default_branch="cheribsd",
                                force_branch=True)
     native_install_dir = DefaultInstallDir.CHERI_SDK
-
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options()
-        cls.full_install = cls.add_bool_option("install-all-tools", help="Whether to install all binutils tools instead"
-                                                                         "of only as, ld and objdump")
+    full_install = BoolConfigOption("install-all-tools", help="Whether to install all binutils tools instead"
+                                                              "of only as, ld and objdump")
 
     def setup(self):
         super().setup()
@@ -88,7 +82,7 @@ class BuildGnuBinutils(AutotoolsProject):
         self.configure_args.append("--disable-shared")
         # newer compilers will default to -std=c99 which will break binutils:
         cflags = "-std=gnu89 -O2"
-        info = self.get_compiler_info(Path(os.getenv("CC", shutil.which("cc"))))
+        info = self.get_compiler_info(self.CC)
         if info.compiler == "clang" or (info.compiler == "gcc" and info.version >= (4, 6, 0)):
             cflags += " -Wno-unused"
         self.configure_environment["CFLAGS"] = cflags

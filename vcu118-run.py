@@ -38,6 +38,7 @@ import time
 import typing
 from abc import abstractmethod
 from pathlib import Path
+from typing import Optional
 
 _cheribuild_root = Path(__file__).resolve().parent
 _pexpect_dir = _cheribuild_root / "3rdparty/pexpect"
@@ -45,16 +46,24 @@ assert (_pexpect_dir / "pexpect/__init__.py").exists()
 sys.path.insert(1, str(_pexpect_dir))
 sys.path.insert(1, str(_pexpect_dir.parent / "ptyprocess"))
 sys.path.insert(1, str(_cheribuild_root))
-from pycheribuild.colour import AnsiColour, coloured  # noqa: E402
-from pycheribuild.utils import ConfigBase, fatal_error, get_global_config, init_global_config  # noqa: E402
-from pycheribuild.config.compilation_targets import CompilationTargets  # noqa: E402
-from pycheribuild.processutils import print_command  # noqa: E402
-from pycheribuild.boot_cheribsd import (boot_and_login, CheriBSDInstance, CheriBSDSpawnMixin, failure,  # noqa: E402
-                                        info, PretendSpawn, success, pexpect)
-from pycheribuild.filesystemutils import FileSystemUtils  # noqa: E402
-
 from serial.tools.list_ports import comports  # noqa: E402
 from serial.tools.list_ports_common import ListPortInfo  # noqa: E402
+
+from pycheribuild.boot_cheribsd import (  # noqa: E402
+    CheriBSDInstance,
+    CheriBSDSpawnMixin,
+    PretendSpawn,
+    boot_and_login,
+    failure,
+    info,
+    pexpect,
+    success,
+)
+from pycheribuild.colour import AnsiColour, coloured  # noqa: E402
+from pycheribuild.config.compilation_targets import CompilationTargets  # noqa: E402
+from pycheribuild.filesystemutils import FileSystemUtils  # noqa: E402
+from pycheribuild.processutils import print_command  # noqa: E402
+from pycheribuild.utils import ConfigBase, fatal_error, get_global_config, init_global_config  # noqa: E402
 
 VIVADO_SCRIPT = b"""
 # Setup some variables
@@ -113,9 +122,8 @@ jtag newtap $_CHIPNAME cpu -irlen 18 -ignore-version -expected-id 0x04B31093
 """
 
     for core in range(num_cores):
-        openocd_script += "\nset _TARGETNAME_{0:d} $_CHIPNAME.cpu{0:d}".format(core)
-        openocd_script += "\ntarget create $_TARGETNAME_{0:d} riscv -chain-position $_CHIPNAME.cpu" \
-                          " -coreid {0:d}".format(core)
+        openocd_script += f"\nset _TARGETNAME_{core:d} $_CHIPNAME.cpu{core:d}"
+        openocd_script += f"\ntarget create $_TARGETNAME_{core:d} riscv -chain-position $_CHIPNAME.cpu -coreid {core:d}"
         if core == 0:
             openocd_script += " -rtos hwthread"
         openocd_script += "\n"
@@ -123,7 +131,7 @@ jtag newtap $_CHIPNAME cpu -irlen 18 -ignore-version -expected-id 0x04B31093
     if num_cores > 0:
         openocd_script += "\ntarget smp"
         for core in range(num_cores):
-            openocd_script += " $_TARGETNAME_{:d}".format(core)
+            openocd_script += f" $_TARGETNAME_{core:d}"
 
     openocd_script += """
 
@@ -140,19 +148,29 @@ reset halt
 
 def load_bitfile(bitfile: Path, ltxfile: Path, fu: FileSystemUtils):
     if shutil.which("vivado") is None:
-        fatal_error("vivado not in $PATH, cannot continue")
+        fatal_error("vivado not in $PATH, cannot continue", pretend=False)
     if bitfile is None or not bitfile.exists():
-        fatal_error("Missing bitfile:", bitfile)
+        fatal_error("Missing bitfile:", bitfile, pretend=False)
     if ltxfile is None or not ltxfile.exists():
-        fatal_error("Missing ltx file:", ltxfile)
+        fatal_error("Missing ltx file:", ltxfile, pretend=False)
     with tempfile.NamedTemporaryFile() as t:
         t.write(VIVADO_SCRIPT)
         with open('vivado_script.txt', 'wb') as f:
             f.write(VIVADO_SCRIPT)
         t.flush()
-        args = ["vivado", "-nojournal", "-notrace", "-nolog",
-                "-source", t.name, "-mode", "batch", "-tclargs",
-                str(bitfile), str(ltxfile)]
+        args = [
+            "vivado",
+            "-nojournal",
+            "-notrace",
+            "-nolog",
+            "-source",
+            t.name,
+            "-mode",
+            "batch",
+            "-tclargs",
+            str(bitfile),
+            str(ltxfile),
+        ]
         print_command(args, config=get_global_config())
         if get_global_config().pretend:
             vivado = PretendSpawn(args[0], args[1:])
@@ -192,8 +210,14 @@ class SerialConnection:
             self.cheribsd = FakeSerialSpawn(executable, args)
         else:
             print_command([executable, *args])
-            self.cheribsd = CheriBSDInstance(CompilationTargets.CHERIBSD_RISCV_HYBRID, executable, args,
-                                             logfile=sys.stdout, encoding="utf-8", timeout=60)
+            self.cheribsd = CheriBSDInstance(
+                CompilationTargets.CHERIBSD_RISCV_HYBRID,
+                executable,
+                args,
+                logfile=sys.stdout,
+                encoding="utf-8",
+                timeout=60,
+            )
         assert isinstance(self.cheribsd, CheriBSDSpawnMixin)
 
     def interact(self):
@@ -218,9 +242,9 @@ class PicoComConnection(SerialConnection):
 
     def show_help_message(self):
         # Print the help message
-        self.cheribsd.sendcontrol('a')
-        self.cheribsd.sendcontrol('h')
-        time.sleep(.5)
+        self.cheribsd.sendcontrol("a")
+        self.cheribsd.sendcontrol("h")
+        time.sleep(0.5)
         success("Interacting with CheriBSD. ", coloured(AnsiColour.yellow, "Use CTRL+A,CTRL+Q to exit"))
 
 
@@ -232,9 +256,9 @@ class PySerialConnection(SerialConnection):
 
     def show_help_message(self):
         # Print the help message
-        self.cheribsd.sendcontrol('t')
-        self.cheribsd.sendcontrol('i')
-        time.sleep(.5)
+        self.cheribsd.sendcontrol("t")
+        self.cheribsd.sendcontrol("i")
+        time.sleep(0.5)
         success("Interacting with CheriBSD. ", coloured(AnsiColour.yellow, "Use CTRL+] to exit"))
 
 
@@ -289,8 +313,17 @@ def get_console(tty_info: ListPortInfo) -> SerialConnection:
     return PySerialConnection(tty_info)
 
 
-def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path, kernel_image: Path = None,
-                          kernel_debug_file: Path = None, tty_info: ListPortInfo, num_cores: int) -> FpgaConnection:
+def load_and_start_kernel(
+    *,
+    gdb_cmd: Path,
+    openocd_cmd: Path,
+    bios_image: Path,
+    kernel_image: "Optional[Path]" = None,
+    kernel_debug_file: "Optional[Path]" = None,
+    tty_info: ListPortInfo,
+    num_cores: int,
+    extra_gdb_commands: "Optional[list[str]]" = None,
+) -> FpgaConnection:
     # Open the serial connection first to check that it's available:
     serial_conn = get_console(tty_info)
     success("Connected to TTY")
@@ -300,8 +333,7 @@ def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path,
     gdb_start_time = datetime.datetime.utcnow()
     openocd, openocd_gdb_port = start_openocd(openocd_cmd, num_cores)
     # openocd is running, now start GDB
-    args = [str(Path(bios_image).absolute()),
-            "-ex", "target extended-remote :" + str(openocd_gdb_port)]
+    args = [str(Path(bios_image).absolute()), "-ex", "target extended-remote :" + str(openocd_gdb_port)]
     args += ["-ex", "set confirm off"]  # avoid interactive prompts
     args += ["-ex", "set pagination off"]  # avoid paginating output, requiring input
     args += ["-ex", "set style enabled off"]  # disable colours since they break the matcher strings
@@ -325,10 +357,14 @@ def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path,
     if num_cores > 1:
         args += ["-ex", "set $entry_point = $pc"]  # Record the entry point to the bios
         for core in range(1, num_cores):
-            args += ["-ex", "thread {:d}".format(core + 1)]  # switch to thread (core + 1) (GDB counts from 1)
+            args += ["-ex", f"thread {core + 1:d}"]  # switch to thread (core + 1) (GDB counts from 1)
             args += ["-ex", "si 5"]  # execute bootrom on every other core
             args += ["-ex", "set $pc=$entry_point"]  # set every other core to the start of the bios
         args += ["-ex", "thread 1"]  # switch back to core 0
+    if extra_gdb_commands is not None:
+        for arg in extra_gdb_commands:
+            args += ["-ex", arg]
+    args += ["-ex", "echo ready to continue\n"]
     print_command(str(gdb_cmd), *args, config=get_global_config())
     if get_global_config().pretend:
         gdb = PretendSpawn(str(gdb_cmd), args, timeout=60)
@@ -336,7 +372,7 @@ def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path,
         gdb = pexpect.spawn(str(gdb_cmd), args, timeout=60, logfile=sys.stdout, encoding="utf-8")
     gdb.expect_exact(["Reading symbols from"])
     # openOCD should acknowledge the GDB connection:
-    openocd.expect_exact(["Info : accepting 'gdb' connection on tcp/{}".format(openocd_gdb_port)])
+    openocd.expect_exact([f"Info : accepting 'gdb' connection on tcp/{openocd_gdb_port}"])
     success("openocd accepted GDB connection")
     gdb.expect_exact(["Remote debugging using :" + str(openocd_gdb_port)])
     success("GDB connected to openocd")
@@ -365,6 +401,7 @@ def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path,
         for core in range(1, num_cores):
             gdb.expect_exact(["0x0000000044000000"])
         success("Done executing bootrom on all other cores")
+    gdb.expect_exact(["ready to continue"])
     gdb.sendline("continue")
     success("Starting CheriBSD after ", datetime.datetime.utcnow() - gdb_start_time)
     i = serial_conn.cheribsd.expect_exact(["bbl loader", "---<<BOOT>>---", pexpect.TIMEOUT], timeout=30)
@@ -381,8 +418,8 @@ def load_and_start_kernel(*, gdb_cmd: Path, openocd_cmd: Path, bios_image: Path,
 
 def find_vcu118_tty(pretend: bool) -> ListPortInfo:
     # find the serial port:
-    expected_vendor_id = 0x10c4
-    expected_product_id = 0xea70
+    expected_vendor_id = 0x10C4
+    expected_product_id = 0xEA70
     for portinfo in comports(include_links=True):
         assert isinstance(portinfo, ListPortInfo)
         if portinfo.pid == expected_product_id and portinfo.vid == expected_vendor_id:
@@ -401,21 +438,35 @@ def main():
     parser.add_argument("--kernel", help="The supervisor-mode program to load", type=abspath_arg)
     parser.add_argument("--kernel-debug-file", help="Debug info file for the kernel", type=abspath_arg)
     parser.add_argument("--gdb", default=shutil.which("gdb") or "gdb", help="Path to GDB binary", type=Path)
-    parser.add_argument("--openocd", default=shutil.which("openocd") or "openocd", help="Path to openocd binary",
-                        type=abspath_arg)
+    parser.add_argument(
+        "--openocd",
+        default=shutil.which("openocd") or "openocd",
+        help="Path to openocd binary",
+        type=abspath_arg,
+    )
     parser.add_argument("--num-cores", type=int, default=1, help="Number of harts on bitstream")
-    parser.add_argument("--test-command", action='append',
-                        help="Run a command non-interactively before possibly opening a console")
+    parser.add_argument(
+        "--test-command",
+        action="append",
+        help="Run a command non-interactively before possibly opening a console",
+    )
+    parser.add_argument("--extra-gdb-command", action="append", help="Run a command in gdb after loading kernel")
     parser.add_argument("--test-timeout", type=int, default=60 * 60, help="Timeout for the test command")
-    parser.add_argument("--benchmark-config", help="Configure for benchmarking before running commands",
-                        action="store_true")
-    parser.add_argument("--pretend", help="Don't actually run the commands just show what would happen",
-                        action="store_true")
-    parser.add_argument("action", choices=["all", "bitfile", "boot", "console"],
-                        default="all", nargs=argparse.OPTIONAL)
+    parser.add_argument(
+        "--benchmark-config",
+        help="Configure for benchmarking before running commands",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--pretend",
+        help="Don't actually run the commands just show what would happen",
+        action="store_true",
+    )
+    parser.add_argument("action", choices=["all", "bitfile", "boot", "console"], default="all", nargs=argparse.OPTIONAL)
     try:
         # noinspection PyUnresolvedReferences
         import argcomplete
+
         argcomplete.autocomplete(parser)
     except ImportError:
         pass
@@ -437,9 +488,16 @@ def main():
         console.interact()
         return
     else:
-        conn = load_and_start_kernel(gdb_cmd=args.gdb, openocd_cmd=args.openocd, bios_image=args.bios,
-                                     kernel_image=args.kernel, kernel_debug_file=args.kernel_debug_file,
-                                     tty_info=tty_info, num_cores=args.num_cores)
+        conn = load_and_start_kernel(
+            gdb_cmd=args.gdb,
+            openocd_cmd=args.openocd,
+            bios_image=args.bios,
+            kernel_image=args.kernel,
+            kernel_debug_file=args.kernel_debug_file,
+            tty_info=tty_info,
+            num_cores=args.num_cores,
+            extra_gdb_commands=args.extra_gdb_command,
+        )
         console = conn.serial
         if args.action == "boot":
             sys.exit(0)

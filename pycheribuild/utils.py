@@ -40,6 +40,7 @@ import traceback
 import typing
 from pathlib import Path
 from threading import RLock
+from typing import Callable, Optional, Union
 
 from .colour import AnsiColour, coloured
 
@@ -49,8 +50,9 @@ __all__ = ["typing", "include_local_file", "Type_T", "init_global_config",  # no
            "warning_message", "DoNotUseInIfStmt", "ThreadJoiner", "InstallInstructions",  # no-combine
            "SafeDict", "error_message", "ConfigBase", "final", "add_error_context",  # no-combine
            "default_make_jobs_count", "OSInfo", "is_jenkins_build", "get_global_config",  # no-combine
-           "classproperty", "find_free_port", "have_working_internet_connection",  "remove_duplicates",  # no-combine
-           "is_case_sensitive_dir", "SocketAndPort", "replace_one", "cached_property", "remove_prefix"]  # no-combine
+           "classproperty", "find_free_port", "have_working_internet_connection", "SocketAndPort",  # no-combine
+           "is_case_sensitive_dir", "replace_one", "cached_property", "remove_prefix",  # no-combine
+           "remove_duplicates", "remove_tuple_duplicates"]  # no-combine
 
 if sys.version_info < (3, 6, 0):
     sys.exit("This script requires at least Python 3.6.0")
@@ -65,8 +67,8 @@ except ImportError:
 
 
 # noinspection PyPep8Naming
-class classproperty(typing.Generic[Type_T]):
-    def __init__(self, f: "typing.Callable[[typing.Any], Type_T]") -> None:
+class classproperty(typing.Generic[Type_T]):  # noqa: N801
+    def __init__(self, f: "Callable[[typing.Any], Type_T]") -> None:
         self.f = f
 
     def __get__(self, obj, owner) -> Type_T:
@@ -74,12 +76,15 @@ class classproperty(typing.Generic[Type_T]):
 
 
 # Placeholder until config has been initialized.
-class DoNotUseInIfStmt(bool if typing.TYPE_CHECKING else object):
-    def __bool__(self) -> "typing.NoReturn":
-        raise ValueError("Should not be used")
+if typing.TYPE_CHECKING:
+    DoNotUseInIfStmt = bool
+else:
+    class DoNotUseInIfStmt:
+        def __bool__(self) -> "typing.NoReturn":
+            raise ValueError("Should not be used")
 
-    def __len__(self) -> "typing.NoReturn":
-        raise ValueError("Should not be used")
+        def __len__(self) -> "typing.NoReturn":
+            raise ValueError("Should not be used")
 
 
 class ConfigBase:
@@ -90,7 +95,8 @@ class ConfigBase:
         self.verbose = verbose
         self.pretend = pretend
         self.force = force
-        self.internet_connection_last_checked_at: typing.Optional[float] = None
+        self.presume_connectivity = False
+        self.internet_connection_last_checked_at: "Optional[float]" = None
         self.internet_connection_last_check_result = False
 
 
@@ -99,7 +105,7 @@ GlobalConfig: ConfigBase = ConfigBase(pretend=DoNotUseInIfStmt(), verbose=DoNotU
 
 
 def init_global_config(config: ConfigBase, *, test_mode: bool = False) -> None:
-    global GlobalConfig
+    global GlobalConfig  # noqa: PLW0603
     GlobalConfig = config
     GlobalConfig.TEST_MODE = test_mode
     assert not (GlobalConfig.verbose and GlobalConfig.quiet), "mutually exclusive"
@@ -119,7 +125,7 @@ else:
 
     # noinspection PyPep8Naming
     class cached_property(typing.Generic[Type_T]):  # noqa: N801
-        def __init__(self, func: "typing.Callable[[typing.Any], Type_T]") -> None:
+        def __init__(self, func: "Callable[[typing.Any], Type_T]") -> None:
             self.func = func
             self.attrname = func.__name__ if sys.version_info < (3, 6) else None
             self.__doc__ = func.__doc__
@@ -130,7 +136,7 @@ else:
                 self.attrname = name
             elif name != self.attrname:
                 raise TypeError("Cannot assign the same cached_property to two different names "
-                                "({} and {}).".format(self.attrname, name))
+                                f"({self.attrname} and {name}).")
 
         def __get__(self, instance, owner=None) -> Type_T:
             if instance is None:
@@ -163,19 +169,19 @@ def is_jenkins_build() -> bool:
     return os.getenv("_CHERIBUILD_JENKINS_BUILD") is not None
 
 
-class SocketAndPort(object):
+class SocketAndPort:
     def __init__(self, sock: socket.socket, port: int):
         self.socket = sock
         self.port = port
 
 
-def find_free_port(preferred_port: int = None) -> SocketAndPort:
+def find_free_port(preferred_port: "Optional[int]" = None) -> SocketAndPort:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     if preferred_port is not None:
         try:
             s.bind(("127.0.0.1", preferred_port))
             return SocketAndPort(s, s.getsockname()[1])
-        except socket.error as e:
+        except OSError as e:
             import errno
             if e.errno != errno.EADDRINUSE:
                 warning_message("Got unexpected error when checking whether port", preferred_port, "is free:", e)
@@ -184,7 +190,7 @@ def find_free_port(preferred_port: int = None) -> SocketAndPort:
     return SocketAndPort(s, s.getsockname()[1])
 
 
-def default_make_jobs_count() -> typing.Optional[int]:
+def default_make_jobs_count() -> Optional[int]:
     make_jobs = os.cpu_count()
     if make_jobs > 24:
         # don't use up all the resources on shared build systems
@@ -193,10 +199,10 @@ def default_make_jobs_count() -> typing.Optional[int]:
     return make_jobs
 
 
-def maybe_add_space(msg, sep) -> tuple:
+def maybe_add_space(msg: str, sep: str) -> "tuple[str, ...]":
     if sep == "":
         return msg, " "
-    return msg,
+    return (msg, )
 
 
 def status_update(*args, sep=" ", **kwargs) -> None:
@@ -246,10 +252,7 @@ def error_message(*args, sep=" ", fixit_hint=None) -> None:
         fixit_message(fixit_hint)
 
 
-def fatal_error(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False, exit_code=3,
-                pretend: bool = None) -> None:
-    if pretend is None:
-        pretend = GlobalConfig.pretend  # TODO: remove
+def fatal_error(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False, exit_code=3, pretend: bool) -> None:
     # we ignore fatal errors when simulating a run
     if pretend:
         print(_add_error_context("Potential fatal error", args, sep=sep), file=sys.stderr, flush=True)
@@ -266,7 +269,7 @@ def fatal_error(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False, ex
 
 
 def query_yes_no(config: ConfigBase, message: str = "", *, default_result=False, force_result=True,
-                 yes_no_str: str = None) -> bool:
+                 yes_no_str: "Optional[str]" = None) -> bool:
     if yes_no_str is None:
         yes_no_str = " [Y]/n " if default_result else " y/[N] "
     if config.pretend:
@@ -286,7 +289,7 @@ def query_yes_no(config: ConfigBase, message: str = "", *, default_result=False,
 
 @functools.lru_cache(maxsize=20)
 def include_local_file(path: str) -> str:
-    file = Path(__file__).parent / path  # type: Path
+    file = Path(__file__).parent / path
     if not file.is_file():
         fatal_error(file, "is missing!", pretend=False)
     with file.open("r", encoding="utf-8") as f:
@@ -294,7 +297,7 @@ def include_local_file(path: str) -> str:
 
 
 def have_working_internet_connection(config: ConfigBase) -> bool:
-    if config.TEST_MODE:
+    if config.TEST_MODE or config.presume_connectivity:
         return True
     current_check_time = time.time()
     if config.internet_connection_last_checked_at:
@@ -350,8 +353,8 @@ def is_case_sensitive_dir(d: Path) -> bool:
 
 
 class InstallInstructions:
-    def __init__(self, message: "typing.Union[str, typing.Callable[[], str]]",
-                 cheribuild_target: "typing.Optional[str]" = None, alternative: str = None):
+    def __init__(self, message: "Union[str, Callable[[], str]]",
+                 cheribuild_target: "Optional[str]" = None, alternative: "Optional[str]" = None):
         self._message = message
         self.cheribuild_target = cheribuild_target
         self.alternative = alternative
@@ -373,11 +376,11 @@ class InstallInstructions:
         return result
 
 
-class OSInfo(object):
+class OSInfo:
     IS_LINUX: bool = sys.platform.startswith("linux")
     IS_FREEBSD: bool = sys.platform.startswith("freebsd")
     IS_MAC: bool = sys.platform.startswith("darwin")
-    __os_release_cache: "typing.Optional[dict[str, str]]" = None
+    __os_release_cache: "Optional[dict[str, str]]" = None
 
     @classmethod
     def is_ubuntu(cls) -> bool:
@@ -423,10 +426,12 @@ class OSInfo(object):
         return d
 
     @classmethod
-    def package_manager(cls) -> str:
+    def package_manager(cls, compat_abi=False) -> str:
         if cls.IS_MAC:
             return "brew"
         elif cls.IS_FREEBSD:
+            if cls.is_cheribsd():
+                return "pkg64" if compat_abi else "pkg64c"
             return "pkg"
         elif cls.IS_LINUX:
             if cls.uses_zypper():
@@ -437,7 +442,7 @@ class OSInfo(object):
 
     @classmethod
     def install_instructions(cls, name, is_lib, default=None, homebrew=None, apt=None, zypper=None, freebsd=None,
-                             cheribuild_target=None, alternative=None) -> InstallInstructions:
+                             cheribuild_target=None, alternative=None, compat_abi=False) -> InstallInstructions:
         guessed_package = False
         if cls.IS_MAC and homebrew:
             install_name = homebrew
@@ -458,7 +463,7 @@ class OSInfo(object):
                     def command_not_found():
                         hint = subprocess.getoutput(shutil.which("command-not-found") + " " + name)
                         print(hint)
-                        if hint and not name + ": command not found" in hint:
+                        if hint and name + ": command not found" not in hint:
                             msg_start = hint.find("The program")
                             if msg_start:
                                 hint = hint[msg_start:]
@@ -477,11 +482,11 @@ class OSInfo(object):
 
         if guessed_package:
             # not sure if the package name is correct:
-            return InstallInstructions("Possibly running `" + cls.package_manager() + " install " + install_name +
-                                       "` fixes this. Note: package name may not be correct.", cheribuild_target,
+            return InstallInstructions(f"Possibly running `{cls.package_manager(compat_abi)} install {install_name}"
+                                       f"` fixes this. Note: package name may not be correct.", cheribuild_target,
                                        alternative)
         else:
-            return InstallInstructions("Run `" + cls.package_manager() + " install " + install_name + "`",
+            return InstallInstructions(f"Run `{cls.package_manager(compat_abi)} install " + install_name + "`",
                                        cheribuild_target, alternative)
 
     @classmethod
@@ -493,8 +498,8 @@ class OSInfo(object):
         return cls.is_suse()
 
 
-class ThreadJoiner(object):
-    def __init__(self, thread: "typing.Optional[threading.Thread]"):
+class ThreadJoiner:
+    def __init__(self, thread: "Optional[threading.Thread]"):
         self.thread = thread
 
     def __enter__(self) -> None:
@@ -521,6 +526,11 @@ def remove_duplicates(items: "typing.Iterable[Type_T]") -> "list[Type_T]":
     return list(dict.fromkeys(items))
 
 
+def remove_tuple_duplicates(items: "typing.Iterable[Type_T]") -> "tuple[Type_T, ...]":
+    # Convert to a dict to remove duplicates (retains order since python 3.6, which is our minimum)
+    return tuple(dict.fromkeys(items))
+
+
 def remove_prefix(s: str, prefix: str, prefix_required=False) -> str:
     if not s.startswith(prefix):
         if prefix_required:
@@ -534,4 +544,5 @@ def remove_prefix(s: str, prefix: str, prefix_required=False) -> str:
 #
 # https://stackoverflow.com/questions/17215400/python-format-string-unused-named-arguments
 class SafeDict(dict):
-    def __missing__(self, key) -> str: return '{' + key + '}'
+    def __missing__(self, key) -> str:
+        return "{" + key + "}"

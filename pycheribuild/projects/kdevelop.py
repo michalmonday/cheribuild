@@ -28,6 +28,7 @@
 # SUCH DAMAGE.
 #
 from .cmake_project import CMakeProject
+from .cross.llvm import BuildCheriLLVM
 from .project import BuildType, DefaultInstallDir, GitRepository
 from .simple_project import SimpleProject
 
@@ -40,7 +41,7 @@ class BuildLibKompareDiff2(CMakeProject):
 
 
 class BuildKDevplatform(CMakeProject):
-    dependencies = ["libkomparediff2"]
+    dependencies = ("libkomparediff2",)
     default_build_type = BuildType.DEBUG
     repository = GitRepository("https://github.com/arichardson/kdevplatform.git", default_branch="cheri")
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
@@ -51,10 +52,11 @@ class BuildKDevplatform(CMakeProject):
 
 
 class BuildKDevelop(CMakeProject):
-    dependencies = ["kdevplatform", "llvm"]
+    dependencies = ("kdevplatform", "llvm")
     default_build_type = BuildType.DEBUG
     repository = GitRepository("https://github.com/arichardson/kdevelop.git", default_branch="cheri")
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
+    supported_architectures = (BuildCheriLLVM.default_architecture,)
 
     def setup(self):
         super().setup()
@@ -64,7 +66,7 @@ class BuildKDevelop(CMakeProject):
 
 class StartKDevelop(SimpleProject):
     target = "run-kdevelop"
-    dependencies = ["kdevelop"]
+    dependencies = ("kdevelop",)
 
     def check_system_dependencies(self) -> None:
         super().check_system_dependencies()

@@ -40,37 +40,52 @@ from run_tests_common import boot_cheribsd, run_tests_main
 def setup_libunwind_env(qemu: boot_cheribsd.CheriBSDInstance, _: argparse.Namespace):
     # We also need libdl and libcxxrt from the sysroot:
     libdir = "libcheri" if qemu.xtarget.is_cheri_purecap() else "lib64"
-    qemu.checked_run("ln -sfv /build/lib/libunwind.so* /usr/{libdir}/".format(libdir=libdir))
-    qemu.checked_run("ln -sfv /sysroot/usr/{libdir}/libcxxrt.so* /sysroot/usr/{libdir}/libdl.so* /usr/{libdir}/".format(
-        libdir=libdir))
+    qemu.checked_run(f"ln -sfv /build/lib/libunwind.so* /usr/{libdir}/")
+    qemu.checked_run(f"ln -sfv /sysroot/usr/{libdir}/libcxxrt.so* /sysroot/usr/{libdir}/libdl.so* /usr/{libdir}/")
     # Add a fake libgcc_s link to libunwind (this works now that we build libunwind with version info)
-    qemu.checked_run("ln -sfv /usr/{libdir}/libunwind.so /usr/{libdir}/libgcc_s.so.1".format(libdir=libdir))
+    qemu.checked_run(f"ln -sfv /usr/{libdir}/libunwind.so /usr/{libdir}/libgcc_s.so.1")
 
 
 def run_libunwind_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespace):
     with tempfile.TemporaryDirectory(prefix="cheribuild-libunwind-tests-") as tempdir:
         # run the tests both for shared and static libunwind by setting -Denable_shared=
         # First static binaries
-        static_everything_success = run_remote_lit_test.run_remote_lit_tests("libunwind", qemu, args, tempdir,
-                                                                             lit_extra_args=[
-                                                                                 "-Dforce_static_executable=True",
-                                                                                 "-Denable_shared=False"],
-                                                                             llvm_lit_path=args.llvm_lit_path)
+        static_everything_success = run_remote_lit_test.run_remote_lit_tests(
+            "libunwind",
+            qemu,
+            args,
+            tempdir,
+            lit_extra_args=["-Dforce_static_executable=True", "-Denable_shared=False"],
+            llvm_lit_path=args.llvm_lit_path,
+        )
         # dynamic binary with libunwind linked statically
-        static_libunwind_success = run_remote_lit_test.run_remote_lit_tests("libunwind", qemu, args, tempdir,
-                                                                            lit_extra_args=["-Denable_shared=False"],
-                                                                            llvm_lit_path=args.llvm_lit_path)
+        static_libunwind_success = run_remote_lit_test.run_remote_lit_tests(
+            "libunwind",
+            qemu,
+            args,
+            tempdir,
+            lit_extra_args=["-Denable_shared=False"],
+            llvm_lit_path=args.llvm_lit_path,
+        )
         # dynamic binary with libunwind linked shared
-        shared_success = run_remote_lit_test.run_remote_lit_tests("libunwind", qemu, args, tempdir,
-                                                                  lit_extra_args=["-Denable_shared=True"],
-                                                                  llvm_lit_path=args.llvm_lit_path)
+        shared_success = run_remote_lit_test.run_remote_lit_tests(
+            "libunwind",
+            qemu,
+            args,
+            tempdir,
+            lit_extra_args=["-Denable_shared=True"],
+            llvm_lit_path=args.llvm_lit_path,
+        )
         return static_libunwind_success and static_everything_success and shared_success
 
 
 def add_cmdline_args(parser: argparse.ArgumentParser):
     # Only 10 tests, don't do the multiprocessing here
-    run_remote_lit_test.add_common_cmdline_args(parser, default_xunit_output="qemu-libunwind-test-results.xml",
-                                                allow_multiprocessing=False)
+    run_remote_lit_test.add_common_cmdline_args(
+        parser,
+        default_xunit_output="qemu-libunwind-test-results.xml",
+        allow_multiprocessing=False,
+    )
 
 
 def adjust_cmdline_args(args: argparse.Namespace):
@@ -80,10 +95,16 @@ def adjust_cmdline_args(args: argparse.Namespace):
     run_remote_lit_test.adjust_common_cmdline_args(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
-        run_tests_main(test_function=run_libunwind_tests, need_ssh=True,  # we need ssh running to execute the tests
-                       argparse_setup_callback=add_cmdline_args, argparse_adjust_args_callback=adjust_cmdline_args,
-                       should_mount_sysroot=True, should_mount_builddir=True, test_setup_function=setup_libunwind_env)
+        run_tests_main(
+            test_function=run_libunwind_tests,
+            need_ssh=True,  # we need ssh running to execute the tests
+            argparse_setup_callback=add_cmdline_args,
+            argparse_adjust_args_callback=adjust_cmdline_args,
+            should_mount_sysroot=True,
+            should_mount_builddir=True,
+            test_setup_function=setup_libunwind_env,
+        )
     finally:
         print("Finished running ", " ".join(sys.argv))

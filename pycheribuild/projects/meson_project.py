@@ -27,16 +27,17 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
+import contextlib
 import itertools
 import os
 import shutil
 from pathlib import Path
 from typing import Sequence
 
-from .project import _CMakeAndMesonSharedLogic, MakeCommandKind
+from .project import MakeCommandKind, _CMakeAndMesonSharedLogic
 from ..config.chericonfig import BuildType
 from ..config.target_info import BasicCompilationTargets, NativeTargetInfo
-from ..utils import include_local_file, InstallInstructions, OSInfo, remove_duplicates
+from ..utils import InstallInstructions, OSInfo, include_local_file, remove_duplicates
 
 __all__ = ["MesonProject"]  # no-combine
 
@@ -67,8 +68,8 @@ class MesonProject(_CMakeAndMesonSharedLogic):
     @classmethod
     def setup_config_options(cls, **kwargs) -> None:
         super().setup_config_options(**kwargs)
-        cls.meson_options = cls.add_config_option("meson-options", default=[], kind=list, metavar="OPTIONS",
-                                                  help="Additional command line options to pass to Meson")
+        cls.meson_options = cls.add_list_option("meson-options", metavar="OPTIONS",
+                                                help="Additional command line options to pass to Meson")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -119,22 +120,21 @@ class MesonProject(_CMakeAndMesonSharedLogic):
 
         # Unlike CMake, Meson does not set the DT_RUNPATH entry automatically:
         # See https://github.com/mesonbuild/meson/issues/6220, https://github.com/mesonbuild/meson/issues/6541, etc.
-        extra_libdirs = [s / self.target_info.default_libdir for s in self.dependency_install_prefixes]
-        try:
-            # If we are installing into a rootfs, remove the rootfs prefix from the RPATH
-            extra_libdirs = ["/" + str(s.relative_to(self.rootfs_dir)) for s in extra_libdirs]
-        except LookupError:
-            pass  # If there isn't a rootfs, we use the absolute paths instead.
-        rpath_dirs = remove_duplicates(self.target_info.additional_rpath_directories + extra_libdirs)
-        if rpath_dirs:
-            self.COMMON_LDFLAGS.append("-Wl,-rpath=" + ":".join(map(str, rpath_dirs)))
+        if not self.compiling_for_host():
+            extra_libdirs = [s / self.target_info.default_libdir for s in self.dependency_install_prefixes]
+            with contextlib.suppress(LookupError):  # If there isn't a rootfs, we use the absolute paths instead.
+                # If we are installing into a rootfs, remove the rootfs prefix from the RPATH
+                extra_libdirs = ["/" + str(s.relative_to(self.rootfs_dir)) for s in extra_libdirs]
+            rpath_dirs = remove_duplicates(self.target_info.additional_rpath_directories + extra_libdirs)
+            if rpath_dirs:
+                self.COMMON_LDFLAGS.append("-Wl,-rpath=" + ":".join(map(str, rpath_dirs)))
 
     def needs_configure(self) -> bool:
         return not (self.build_dir / "build.ninja").exists()
 
     def _toolchain_file_list_to_str(self, values: list) -> str:
         # The meson toolchain file uses python-style lists
-        assert all(isinstance(x, str) or isinstance(x, Path) for x in values), \
+        assert all(isinstance(x, (str, Path)) for x in values), \
             "All values should be strings/Paths: " + str(values)
         return str(list(map(str, values)))
 
@@ -175,7 +175,7 @@ class MesonProject(_CMakeAndMesonSharedLogic):
                 # To find native packages we have to add the bootstrap tools to PKG_CONFIG_PATH and CMAKE_PREFIX_PATH.
                 NATIVE_PKG_CONFIG_PATH=remove_duplicates(host_pkg_config_dirs),
                 NATIVE_CMAKE_PREFIX_PATH=remove_duplicates(
-                    host_prefixes + host_target_info.cmake_prefix_paths(self.config))
+                    host_prefixes + host_target_info.cmake_prefix_paths(self.config)),
             )
 
         if self.install_prefix != self.install_dir:

@@ -34,8 +34,12 @@ from ..utils import ThreadJoiner
 
 
 class BuildGo(Project):
-    github_base_url = "https://github.com/CTSRD-CHERI/"
-    repository = GitRepository(github_base_url + "freebsd-mips-go.git")
+    repository = GitRepository(
+        "https://github.com/golang/go.git",
+        default_branch="release-branch.go1.21",
+        force_branch=True,
+        old_urls=[b"https://github.com/CTSRD-CHERI/freebsd-mips-go.git"],
+    )
     no_default_sysroot = None
     skip_cheri_symlinks = True
     native_install_dir = DefaultInstallDir.CHERI_SDK
@@ -43,8 +47,8 @@ class BuildGo(Project):
     @classmethod
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
-        cls.go_bootstrap = cls.add_path_option("bootstrap-toolchain", show_help=False,
-                                               help="Path to alternate go bootstrap toolchain.")
+        cls.go_bootstrap = cls.add_optional_path_option("bootstrap-toolchain", show_help=False,
+                                                        help="Path to alternate go bootstrap toolchain.")
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -53,8 +57,11 @@ class BuildGo(Project):
         self.make_dir = self.source_dir / "src"
         self.bin_dir = self.source_dir / "bin"
         self.pkg_dir = self.source_dir / "pkg"
-        self.goroot_dir = self.install_dir / "go"
         self.go_cache = Path("~").expanduser() / ".cache" / "go-build"
+
+    @property
+    def goroot_dir(self):
+        return self.real_install_root_dir / "go"
 
     def build_dir_for_target(self, target: CrossCompileTarget):
         return self.source_dir / "pkg"
@@ -62,7 +69,7 @@ class BuildGo(Project):
     def compile(self, **kwargs):
         env = {
             "GOROOT_FINAL": self.goroot_dir,
-            }
+        }
         if self.go_bootstrap:
             env["GOROOT_BOOTSTRAP"] = self.go_bootstrap
 

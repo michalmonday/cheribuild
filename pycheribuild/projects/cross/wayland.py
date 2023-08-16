@@ -29,12 +29,12 @@ import shutil
 from pathlib import Path
 
 from .crosscompileproject import CrossCompileAutotoolsProject, CrossCompileCMakeProject, CrossCompileMesonProject
-from ..project import DefaultInstallDir, GitRepository, AutotoolsProject
+from ..project import AutotoolsProject, DefaultInstallDir, GitRepository
 from ..simple_project import SimpleProject
 from ...config.chericonfig import CheriConfig, Linkage
 from ...config.compilation_targets import CompilationTargets
-from ...utils import OSInfo
 from ...processutils import get_program_version, ssh_config_parameters
+from ...utils import OSInfo
 
 
 class BuildEPollShim(CrossCompileCMakeProject):
@@ -42,7 +42,7 @@ class BuildEPollShim(CrossCompileCMakeProject):
     repository = GitRepository("https://github.com/jiixyj/epoll-shim",
                                temporary_url_override="https://github.com/arichardson/epoll-shim",
                                url_override_reason="https://github.com/jiixyj/epoll-shim/pull/36")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def configure(self, **kwargs):
         self.add_cmake_options(ENABLE_COMPILER_WARNINGS=True)
@@ -71,11 +71,11 @@ class BuildLibUdevDevd(CrossCompileMesonProject):
     repository = GitRepository("https://github.com/wulf7/libudev-devd",
                                old_urls=[b"https://github.com/FreeBSDDesktop/libudev-devd"])
     supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.NATIVE_IF_FREEBSD
-    dependencies = ["linux-input-h"]
+    dependencies = ("linux-input-h",)
 
     def setup(self):
         super().setup()
-        self.CFLAGS.append("-I" + str(BuildLinux_Input_H.get_instance(self).include_install_dir))
+        self.CFLAGS.append("-I" + str(BuildLinuxInputH.get_instance(self).include_install_dir))
 
 
 # Some projects unconditionally include linux/input.h to exist. For FreeBSD dev/evdev/input.h provides a
@@ -83,7 +83,8 @@ class BuildLibUdevDevd(CrossCompileMesonProject):
 # XXX: the evdev-proto port downloads the Linux headers and patches those instead, but it seems to me that creating
 # a file that includes the native dev/evdev/*.h is less fragile since it doesn't rely on ioctl() numbers being
 # compatible, etc.
-class BuildLinux_Input_H(SimpleProject):
+class BuildLinuxInputH(SimpleProject):
+    target = "linux-input-h"
     supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.NATIVE_IF_FREEBSD
 
     def process(self):
@@ -107,12 +108,12 @@ class BuildMtdev(CrossCompileAutotoolsProject):
     target = "mtdev"
     needs_full_history = True  # can't use --depth with http:// git repo
     repository = GitRepository("http://bitmath.org/git/mtdev.git")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         if cls.get_crosscompile_target().target_info_cls.is_freebsd():
-            return super().dependencies(config) + ["linux-input-h"]
+            return (*super().dependencies(config), "linux-input-h")
         return super().dependencies(config)
 
     def linkage(self):
@@ -123,13 +124,13 @@ class BuildMtdev(CrossCompileAutotoolsProject):
         self.COMMON_FLAGS.append("-fPIC")  # need a pic archive since it's linked into a .so
         self.cross_warning_flags.append("-Wno-error=format")
         if self.target_info.is_freebsd():
-            self.CFLAGS.append("-I" + str(BuildLinux_Input_H.get_instance(self).include_install_dir))
+            self.CFLAGS.append("-I" + str(BuildLinuxInputH.get_instance(self).include_install_dir))
 
 
 class BuildLibEvdev(CrossCompileMesonProject):
     target = "libevdev"
     repository = GitRepository("https://gitlab.freedesktop.org/libevdev/libevdev.git")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()
@@ -140,7 +141,7 @@ class BuildLibEvdev(CrossCompileMesonProject):
 class BuildLibInput(CrossCompileMesonProject):
     target = "libinput"
     repository = GitRepository("https://gitlab.freedesktop.org/libinput/libinput.git")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def check_system_dependencies(self) -> None:
         super().check_system_dependencies()
@@ -148,10 +149,10 @@ class BuildLibInput(CrossCompileMesonProject):
             self.check_required_pkg_config("libudev", apt="libudev-dev")
 
     @classmethod
-    def dependencies(cls, config) -> "list[str]":
-        result = super().dependencies(config) + ["mtdev", "libevdev"]
+    def dependencies(cls, config) -> "tuple[str, ...]":
+        result = (*super().dependencies(config), "mtdev", "libevdev")
         if cls.get_crosscompile_target().target_info_cls.is_freebsd():
-            result.extend(["libudev-devd", "epoll-shim"])
+            result += ("libudev-devd", "epoll-shim")
         return result
 
     def setup(self):
@@ -176,7 +177,7 @@ class BuildLibFFI(CrossCompileAutotoolsProject):
                                temporary_url_override="https://github.com/CTSRD-CHERI/libffi.git",
                                url_override_reason="Needs lots of CHERI fixes")
     target = "libffi"
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()
@@ -245,18 +246,18 @@ class BuildWayland(CrossCompileMesonProject):
     needs_native_build_for_crosscompile = True
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         deps = super().dependencies(config)
         target = cls.get_crosscompile_target()
         if not target.is_native() or target.target_info_cls.is_cheribsd():
             # For native (non-CheriBSD) builds we use the host libraries
-            deps.extend(["libexpat", "libffi", "libxml2"])
+            deps += ("libexpat", "libffi", "libxml2")
         if target.target_info_cls.is_freebsd():
-            deps += ["epoll-shim"]
+            deps += ("epoll-shim",)
         return deps
     repository = GitRepository("https://gitlab.freedesktop.org/wayland/wayland.git", default_branch="main",
                                force_branch=True, old_urls=[b"https://github.com/CTSRD-CHERI/wayland"])
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()
@@ -281,9 +282,9 @@ class BuildWayland(CrossCompileMesonProject):
 
 class BuildWaylandProtocols(CrossCompileMesonProject):
     target = "wayland-protocols"
-    dependencies = ["wayland", "wayland-native"]  # native wayland-scanner is needed for tests
+    dependencies = ("wayland", "wayland-native")  # native wayland-scanner is needed for tests
     repository = GitRepository("https://gitlab.freedesktop.org/wayland/wayland-protocols.git")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()
@@ -294,7 +295,7 @@ class BuildWaylandProtocols(CrossCompileMesonProject):
 class BuildSeatd(CrossCompileMesonProject):
     target = "seatd"
     repository = GitRepository("https://git.sr.ht/~kennylevinsen/seatd")
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()

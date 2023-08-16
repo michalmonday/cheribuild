@@ -37,12 +37,13 @@ import sys
 import typing
 from collections import OrderedDict
 from pathlib import Path
+from typing import Optional, Union
 
 from .utils import status_update, warning_message
 
 
-class MtreeEntry(object):
-    def __init__(self, path: str, attributes: "typing.Dict[str, str]"):
+class MtreeEntry:
+    def __init__(self, path: str, attributes: "dict[str, str]"):
         self.path = path
         self.attributes = attributes
 
@@ -53,7 +54,7 @@ class MtreeEntry(object):
         return self.attributes.get("type") == "file"
 
     @classmethod
-    def parse(cls, line: str, contents_root: Path = None) -> "MtreeEntry":
+    def parse(cls, line: str, contents_root: "Optional[Path]" = None) -> "MtreeEntry":
         elements = shlex.split(line)
         path = elements[0]
         # Ensure that the path is normalized:
@@ -70,15 +71,14 @@ class MtreeEntry(object):
             if k in ("tags", "time"):
                 continue
             # convert relative contents=keys to absolute ones
-            if contents_root and k == "contents":
-                if not os.path.isabs(v):
-                    v = str(contents_root / v)
+            if contents_root and k == "contents" and not os.path.isabs(v):
+                v = str(contents_root / v)
             attr_dict[k] = v
         return MtreeEntry(path, attr_dict)
         # FIXME: use contents=
 
     @classmethod
-    def parse_all_dirs_in_mtree(cls, mtree_file: Path) -> "typing.List[MtreeEntry]":
+    def parse_all_dirs_in_mtree(cls, mtree_file: Path) -> "list[MtreeEntry]":
         with mtree_file.open("r", encoding="utf-8") as f:
             result = []
             for line in f.readlines():
@@ -101,15 +101,15 @@ class MtreeEntry(object):
         return "<MTREE entry: " + str(self) + ">"
 
 
-class MtreeFile(object):
-    def __init__(self, *, verbose: bool, file: "typing.Union[io.StringIO,Path,typing.IO]" = None,
-                 contents_root: Path = None):
+class MtreeFile:
+    def __init__(self, *, verbose: bool, file: "Union[io.StringIO, Path, typing.IO, None]" = None,
+                 contents_root: "Optional[Path]" = None):
         self.verbose = verbose
-        self._mtree = OrderedDict()  # type: typing.Dict[str, MtreeEntry]
+        self._mtree: "dict[str, MtreeEntry]" = OrderedDict()
         if file:
             self.load(file, contents_root=contents_root, append=False)
 
-    def load(self, file: "typing.Union[io.StringIO,Path,typing.IO]", *, append: bool, contents_root: Path = None):
+    def load(self, file: "Union[io.StringIO,Path,typing.IO]", *, append: bool, contents_root: "Optional[Path]" = None):
         if isinstance(file, Path):
             with file.open("r") as f:
                 self.load(f, contents_root=contents_root, append=append)
@@ -139,7 +139,7 @@ class MtreeFile(object):
                 warning_message("Could not parse line", line, "in mtree file", file, ":", e)
 
     @staticmethod
-    def _ensure_mtree_mode_fmt(mode: "typing.Union[str, int]") -> str:
+    def _ensure_mtree_mode_fmt(mode: "Union[str, int]") -> str:
         if not isinstance(mode, str):
             mode = "0" + oct(mode)[2:]
         assert mode.startswith("0")
@@ -159,8 +159,8 @@ class MtreeFile(object):
     @staticmethod
     def infer_mode_string(path: Path, should_be_dir) -> str:
         try:
-            result = "0{0:o}".format(stat.S_IMODE(path.lstat().st_mode))  # format as octal with leading 0 prefix
-        except IOError as e:
+            result = f"0{stat.S_IMODE(path.lstat().st_mode):o}"  # format as octal with leading 0 prefix
+        except OSError as e:
             default = "0755" if should_be_dir else "0644"
             warning_message("Failed to stat", path, "assuming mode", default, e)
             result = default
@@ -173,8 +173,8 @@ class MtreeFile(object):
             return "0600"
         return result
 
-    def add_file(self, file: "typing.Optional[Path]", path_in_image, mode=None, uname="root", gname="wheel",
-                 print_status=True, parent_dir_mode=None, symlink_dest: str = None):
+    def add_file(self, file: "Optional[Path]", path_in_image, mode=None, uname="root", gname="wheel",
+                 print_status=True, parent_dir_mode=None, symlink_dest: "Optional[str]" = None):
         if isinstance(path_in_image, Path):
             path_in_image = str(path_in_image)
         assert not path_in_image.startswith("/")
@@ -190,21 +190,21 @@ class MtreeFile(object):
         if symlink_dest is not None:
             assert file is None
             reference_dir = None
-        else:
-            reference_dir = file.parent
-        self.add_dir(str(Path(path_in_image).parent), mode=parent_dir_mode, uname=uname, gname=gname,
-                     reference_dir=reference_dir, print_status=print_status)
-        if symlink_dest is not None:
             mtree_type = "link"
             last_attrib = ("link", str(symlink_dest))
-        elif file.is_symlink():
-            mtree_type = "link"
-            last_attrib = ("link", os.readlink(str(file)))
         else:
-            mtree_type = "file"
-            # now add the actual entry (with contents=/path/to/file)
-            contents_path = str(file.absolute())
-            last_attrib = ("contents", contents_path)
+            assert file is not None
+            reference_dir = file.parent
+            if file.is_symlink():
+                mtree_type = "link"
+                last_attrib = ("link", os.readlink(str(file)))
+            else:
+                mtree_type = "file"
+                # now add the actual entry (with contents=/path/to/file)
+                contents_path = str(file.absolute())
+                last_attrib = ("contents", contents_path)
+        self.add_dir(str(Path(path_in_image).parent), mode=parent_dir_mode, uname=uname, gname=gname,
+                     reference_dir=reference_dir, print_status=print_status)
         attribs = OrderedDict([("type", mtree_type), ("uname", uname), ("gname", gname), ("mode", mode), last_attrib])
         if print_status:
             if "link" in attribs:
@@ -213,7 +213,7 @@ class MtreeFile(object):
                 status_update("Adding file", file, "to mtree as", mtree_path, file=sys.stderr)
         self._mtree[mtree_path] = MtreeEntry(mtree_path, attribs)
 
-    def add_symlink(self, *, src_symlink: Path = None, symlink_dest=None, path_in_image: str, **kwargs):
+    def add_symlink(self, *, src_symlink: "Optional[Path]" = None, symlink_dest=None, path_in_image: str, **kwargs):
         if src_symlink is not None:
             assert symlink_dest is None
             self.add_file(src_symlink, path_in_image, **kwargs)
@@ -238,10 +238,9 @@ class MtreeFile(object):
                 mode = self.infer_mode_string(reference_dir, True)
         mode = self._ensure_mtree_mode_fmt(mode)
         # Ensure that SSH will work even if the extra-file directory has wrong permissions
-        if path == "root" or path == "root/.ssh":
-            if mode != "0700" and mode != "0755":
-                warning_message("Wrong file mode", mode, "for /", path, " --  it should be 0755, fixing it for image")
-                mode = "0755"
+        if (path == "root" or path == "root/.ssh") and mode != "0700" and mode != "0755":
+            warning_message("Wrong file mode", mode, "for /", path, " --  it should be 0755, fixing it for image")
+            mode = "0755"
         # recursively add all parent dirs that don't exist yet
         parent = str(Path(path).parent)
         if parent != path:  # avoid recursion for path == "."
@@ -264,7 +263,7 @@ class MtreeFile(object):
         """Remove paths matching any pattern in globs (but not matching any in exceptions)"""
         if exceptions is None:
             exceptions = []
-        if type(globs) == str:
+        if isinstance(globs, str):
             globs = [globs]
         for glob in globs + exceptions:
             # glob must be anchored at the root (./) or start with a pattern
@@ -289,7 +288,7 @@ class MtreeFile(object):
         import pprint
         return "<MTREE: " + pprint.pformat(self._mtree) + ">"
 
-    def write(self, output: "typing.Union[io.StringIO,Path,typing.IO]", *, pretend):
+    def write(self, output: "Union[io.StringIO,Path,typing.IO]", *, pretend):
         if pretend:
             return
         if isinstance(output, Path):

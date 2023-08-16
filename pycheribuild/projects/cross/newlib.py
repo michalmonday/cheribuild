@@ -30,9 +30,10 @@
 #
 import tempfile
 from pathlib import Path
-from typing import ClassVar
 
 from .crosscompileproject import CompilationTargets, CrossCompileAutotoolsProject, GitRepository, MakeCommandKind
+from ..simple_project import BoolConfigOption
+from ...config.target_info import CrossCompileTarget
 from ...processutils import commandline_to_str
 
 
@@ -47,30 +48,21 @@ class BuildNewlib(CrossCompileAutotoolsProject):
     _configure_supports_variables_on_cmdline = True
     # CC,CFLAGS, etc. are the compilers for the build host not the target -> don't set automatically
     _autotools_add_default_compiler_args = False
-    supported_architectures = \
-        [CompilationTargets.BAREMETAL_NEWLIB_MIPS64,
-         CompilationTargets.BAREMETAL_NEWLIB_MIPS64_PURECAP,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV32,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV32_HYBRID,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV32_PURECAP,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV64,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV64_HYBRID,
-         CompilationTargets.BAREMETAL_NEWLIB_RISCV64_PURECAP] + CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS
-
-    locale_support: "ClassVar[bool]"
+    supported_architectures = (*CompilationTargets.ALL_NEWLIB_TARGETS, *CompilationTargets.ALL_SUPPORTED_RTEMS_TARGETS)
+    locale_support = BoolConfigOption("locale-support", show_help=False, help="Build with locale support")
     # build_in_source_dir = True  # we have to build in the source directory
 
-    @classmethod
-    def setup_config_options(cls, **kwargs):
-        super().setup_config_options(**kwargs)
-        cls.locale_support = cls.add_bool_option("locale-support", show_help=False, help="Build with locale support")
+    @staticmethod
+    def custom_target_name(base_target: str, xtarget: CrossCompileTarget) -> str:
+        if xtarget.target_info_cls.is_newlib() and not xtarget.target_info_cls.is_rtems():
+            return base_target + "-baremetal-" + xtarget.base_arch_suffix
+        return base_target + "-" + xtarget.generic_target_suffix
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._install_prefix = self._install_prefix.parent  # newlib install already appends the triple
-        self._install_dir = self._install_dir.parent  # newlib install already appends the triple
-        self.verbose_print("install_dir=", self.install_dir, "_install_prefix=", self._install_prefix, "_install_dir=",
-                           self._install_dir, "dest=", self.destdir, "real=", self.real_install_root_dir)
+        assert self._install_prefix == Path("/", self.target_info.target_triple)
+        assert self.destdir.name != self.target_info.target_triple
+        self._install_prefix = Path("/")  # newlib install already appends the triple
         self.configure_command = self.source_dir / "configure"
 
     # def install(self, **kwargs):
@@ -163,7 +155,7 @@ class BuildNewlib(CrossCompileAutotoolsProject):
         elif self.target_info.is_rtems():
             self.configure_args.extend([
                 "--enable-newlib-io-c99-formats",
-                "--disable-libstdcxx"  # not sure if this is needed
+                "--disable-libstdcxx",  # not sure if this is needed
                 ])
 
         if self.locale_support:
@@ -202,8 +194,8 @@ int main(int argc, char** argv) {
             # FIXME: CHERI helloworld
             compiler_flags = self.essential_compiler_and_linker_flags + self.COMMON_FLAGS + [
                 "-Wl,-T,qemu-malta.ld", "-Wl,-verbose", "--sysroot=" + str(self.sdk_sysroot)]
-            self.run_cmd([self.sdk_bindir / "clang", "main.c", "-o", test_exe] + compiler_flags + ["-###"], cwd=td)
-            self.run_cmd([self.sdk_bindir / "clang", "main.c", "-o", test_exe] + compiler_flags, cwd=td)
+            self.run_cmd([self.sdk_bindir / "clang", "main.c", "-o", test_exe, *compiler_flags, "-###"], cwd=td)
+            self.run_cmd([self.sdk_bindir / "clang", "main.c", "-o", test_exe, *compiler_flags], cwd=td)
             self.run_cmd(self.sdk_bindir / "llvm-readobj", "-h", test_exe)
             from ..build_qemu import BuildQEMU
             self.run_cmd(self.sdk_sysroot / "bin/run_with_qemu.py", "--qemu", BuildQEMU.qemu_binary(self),

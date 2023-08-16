@@ -28,11 +28,22 @@
 # SUCH DAMAGE.
 #
 
+from typing import Optional
+
 from .cheribsd import ConfigPlatform
 from .crosscompileproject import CompilationTargets, CrossCompileAutotoolsProject
 from ..build_qemu import BuildQEMU
-from ..project import (BuildType, CheriConfig, ComputedDefaultValue, CrossCompileTarget, DefaultInstallDir,
-                       GitRepository, MakeCommandKind, Project)
+from ..project import (
+    BuildType,
+    CheriConfig,
+    ComputedDefaultValue,
+    CrossCompileTarget,
+    DefaultInstallDir,
+    GitRepository,
+    MakeCommandKind,
+    Project,
+)
+from ...qemu_utils import QemuOptions
 
 
 class BuildBBLBase(CrossCompileAutotoolsProject):
@@ -48,13 +59,15 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
     kernel_class = None
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
     without_payload = False
+    enable_zero_bss = False
+    custom_payload: Optional[str] = None
     mem_start = "0x80000000"
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         result = super().dependencies(config)
         if cls.kernel_class:
-            result.append(cls.kernel_class.get_class_for_target(cls.get_crosscompile_target()).target)
+            result += (cls.kernel_class.get_class_for_target(cls.get_crosscompile_target()).target, )
         return result
 
     def setup(self):
@@ -93,6 +106,8 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
             # Build an OpenSBI fw_jump style BBL
             assert self.kernel_class is None
             self.configure_args.append("--without-payload")
+        elif self.custom_payload:
+            self.configure_args.append("--with-payload=" + str(self.custom_payload))
         else:
             # Add the kernel as a payload:
             assert self.kernel_class is not None
@@ -101,6 +116,10 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
             kernel_path = kernel_project.get_kernel_install_path(kernel_config)
             self.configure_args.append("--with-payload=" + str(kernel_path))
 
+        # XXX: Should this explicitly disable once updated bbl is widespread?
+        if self.enable_zero_bss:
+            self.configure_args.append("--enable-zero-bss")
+
     def compile(self, **kwargs):
         self.run_make("bbl")
 
@@ -108,7 +127,8 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
         self.install_file(self.build_dir / "bbl", self.real_install_root_dir / "bbl")
 
     @classmethod
-    def get_installed_kernel_path(cls, caller, config: CheriConfig = None, cross_target: CrossCompileTarget = None):
+    def get_installed_kernel_path(cls, caller, config: "Optional[CheriConfig]" = None,
+                                  cross_target: "Optional[CrossCompileTarget]" = None):
         return cls.get_instance(caller, config=config, cross_target=cross_target).real_install_root_dir / "bbl"
 
 
@@ -117,15 +137,34 @@ def _bbl_install_dir(config: CheriConfig, project: Project):
     return config.cheri_sdk_dir / ("bbl" + project.build_dir_suffix) / dir_name
 
 
+class BuildBBLTestPayload(BuildBBLBase):
+    target = "bbl-test-payload"
+    default_directory_basename = "bbl"  # reuse same source dir
+    build_dir_suffix = "-test-payload"  # but not the build dir
+    cross_install_dir = DefaultInstallDir.DO_NOT_INSTALL
+    supported_architectures = (CompilationTargets.FREESTANDING_RISCV64_PURECAP, CompilationTargets.FREESTANDING_RISCV64)
+    custom_payload = "dummy_payload"
+
+    def setup(self):
+        super().setup()
+        self.configure_args.append("--enable-logo")
+        self.configure_args.append("--enable-print-device-tree")
+
+    def run_tests(self) -> None:
+        options = QemuOptions(self.crosscompile_target)
+        self.run_cmd(options.get_commandline(
+            qemu_command=BuildQEMU.qemu_binary(self), add_network_device=False, bios_args=["-bios", "none"],
+            kernel_file=self.build_dir / "bbl"),
+            give_tty_control=True, cwd="/")
+
+
 # Build BBL without an embedded payload
 class BuildBBLNoPayload(BuildBBLBase):
     target = "bbl"
     default_directory_basename = "bbl"
     without_payload = True
     cross_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR
-    supported_architectures = [CompilationTargets.BAREMETAL_NEWLIB_RISCV64_PURECAP,
-                               CompilationTargets.BAREMETAL_NEWLIB_RISCV64]
-
+    supported_architectures = (CompilationTargets.FREESTANDING_RISCV64_PURECAP, CompilationTargets.FREESTANDING_RISCV64)
     _default_install_dir_fn = ComputedDefaultValue(function=_bbl_install_dir,
                                                    as_string="$SDK_ROOT/bbl/riscv{32,64}{,-purecap}")
 
@@ -145,6 +184,7 @@ class BuildBBLNoPayloadGFE(BuildBBLNoPayload):
     target = "bbl-gfe"
     default_directory_basename = "bbl"  # reuse same source dir
     build_dir_suffix = "-gfe"  # but not the build dir
+    enable_zero_bss = True
 
     _default_install_dir_fn = ComputedDefaultValue(function=_bbl_install_dir,
                                                    as_string="$SDK_ROOT/bbl-gfe/riscv{32,64}{,-purecap}")

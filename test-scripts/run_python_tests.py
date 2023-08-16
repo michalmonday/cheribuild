@@ -43,30 +43,45 @@ def run_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespace) ->
     if args.full_test:
         # copy python libs from smb to tmpfs:
         install_prefix = Path(args.install_prefix)
-        qemu.checked_run("time cp -a '{pfx}' '{pfx}.tmpfs'".format(pfx=install_prefix))
-        qemu.checked_run("umount '{pfx}'".format(pfx=install_prefix))
-        qemu.checked_run("rmdir '{pfx}' && mv '{pfx}.tmpfs' '{pfx}'".format(pfx=install_prefix))
+        qemu.checked_run(f"time cp -a '{install_prefix}' '{install_prefix}.tmpfs'")
+        qemu.checked_run(f"umount '{install_prefix}'")
+        qemu.checked_run(f"rmdir '{install_prefix}' && mv '{install_prefix}.tmpfs' '{install_prefix}'")
 
     # run basic sanity check:
     build_python_exe = "python" + args.buildexe_suffix
-    qemu.checked_run("/build/{} --version".format(build_python_exe))
-    qemu.checked_run("/build/{} -E -c 'import sys; sys.exit(0)'".format(build_python_exe))
+    qemu.checked_run(f"/build/{build_python_exe} --version")
+    qemu.checked_run(f"/build/{build_python_exe} -E -c 'import sys; sys.exit(0)'")
 
     if args.full_test:
         # Run the full test suite:
-        qemu.checked_run("cd /build && ./{} -m test -v --junit-xml=python-tests.xml".format(build_python_exe))
+        qemu.checked_run(f"cd /build && ./{build_python_exe} -m test -v --junit-xml=python-tests.xml")
     return True
 
 
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument("--buildexe-suffix", required=False, default="", help="Suffix for build executables")
-    parser.add_argument("--full-test", action="store_true", required=False, dest="full_test",
-                        help="Run the full python test suite")
-    parser.add_argument("--smoketest", action="store_false", required=False, dest="full_test",
-                        help="Don't run full python test suite, only check that a basic program works")
+    parser.add_argument(
+        "--full-test",
+        action="store_true",
+        required=False,
+        dest="full_test",
+        help="Run the full python test suite",
+    )
+    parser.add_argument(
+        "--smoketest",
+        action="store_false",
+        required=False,
+        dest="full_test",
+        help="Don't run full python test suite, only check that a basic program works",
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # we don't need ssh running to execute the tests
-    run_tests_main(test_function=run_tests, need_ssh=False, should_mount_builddir=True, should_mount_srcdir=True,
-                   argparse_setup_callback=add_args)
+    run_tests_main(
+        test_function=run_tests,
+        need_ssh=False,
+        should_mount_builddir=True,
+        should_mount_srcdir=True,
+        argparse_setup_callback=add_args,
+    )

@@ -31,9 +31,16 @@ import datetime
 import json
 import typing
 from pathlib import Path
+from typing import Optional
 
-from run_tests_common import (boot_cheribsd, commandline_to_str, finish_and_write_junit_xml_report,
-                              get_default_junit_xml_name, junitparser, run_tests_main)
+from run_tests_common import (
+    boot_cheribsd,
+    commandline_to_str,
+    finish_and_write_junit_xml_report,
+    get_default_junit_xml_name,
+    junitparser,
+    run_tests_main,
+)
 
 
 def do_setup(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespace):
@@ -61,8 +68,10 @@ def run_meson_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespa
             env_cmd = ""
             if ti.env_vars:
                 env_cmd = " env " + commandline_to_str(k + "=" + str(v) for k, v in ti.env_vars.items())
-            qemu.checked_run("cd {cwd} &&{env} {cmd}".format(cwd=ti.cwd or "/build", cmd=commandline, env=env_cmd),
-                             timeout=ti.timeout or 10 * 60)
+            qemu.checked_run(
+                "cd {cwd} &&{env} {cmd}".format(cwd=ti.cwd or "/build", cmd=commandline, env=env_cmd),
+                timeout=ti.timeout or 10 * 60,
+            )
         except boot_cheribsd.CheriBSDCommandFailed as e:
             boot_cheribsd.failure("Failed to run ", ti.name, ": ", str(e), exit=False)
             if isinstance(e, boot_cheribsd.CheriBSDCommandTimeout):
@@ -81,16 +90,21 @@ def run_meson_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespa
 
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument("--junit-xml", required=False, help="Output file name for the JUnit XML results")
-    parser.add_argument("--test-setup-command", action="append", dest="test_setup_commands", metavar="COMMAND",
-                        help="Run COMMAND as an additional test setup step before running the tests")
+    parser.add_argument(
+        "--test-setup-command",
+        action="append",
+        dest="test_setup_commands",
+        metavar="COMMAND",
+        help="Run COMMAND as an additional test setup step before running the tests",
+    )
 
 
 class MesonTestInfo(typing.NamedTuple):
     name: str
-    command: typing.List[str]
-    cwd: typing.Optional[str]
-    env_vars: typing.Dict[str, str]
-    timeout: typing.Optional[int]
+    command: "list[str]"
+    cwd: Optional[str]
+    env_vars: "dict[str, str]"
+    timeout: Optional[int]
 
 
 def adjust_args(args: argparse.Namespace):
@@ -107,14 +121,35 @@ def adjust_args(args: argparse.Namespace):
             protocol = test.get("protocol", None)
             name = test["name"]
             if protocol != "exitcode":
-                boot_cheribsd.failure("Unknown/unsupported testing protocol '", protocol, "' for test", name, ":", test,
-                                      exit=True)
-            args.test_info.append(MesonTestInfo(name=name, command=test["cmd"], cwd=test["workdir"],
-                                                env_vars=test["env"], timeout=test["timeout"]))
+                boot_cheribsd.failure(
+                    "Unknown/unsupported testing protocol '",
+                    protocol,
+                    "' for test",
+                    name,
+                    ":",
+                    test,
+                    exit=True,
+                )
+            args.test_info.append(
+                MesonTestInfo(
+                    name=name,
+                    command=test["cmd"],
+                    cwd=test["workdir"],
+                    env_vars=test["env"],
+                    timeout=test["timeout"],
+                ),
+            )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # we don't need ssh running to execute the tests
-    run_tests_main(test_function=run_meson_tests, test_setup_function=do_setup,
-                   need_ssh=False, argparse_setup_callback=add_args, argparse_adjust_args_callback=adjust_args,
-                   should_mount_builddir=True, should_mount_srcdir=True, should_mount_sysroot=True)
+    run_tests_main(
+        test_function=run_meson_tests,
+        test_setup_function=do_setup,
+        need_ssh=False,
+        argparse_setup_callback=add_args,
+        argparse_adjust_args_callback=adjust_args,
+        should_mount_builddir=True,
+        should_mount_srcdir=True,
+        should_mount_sysroot=True,
+    )

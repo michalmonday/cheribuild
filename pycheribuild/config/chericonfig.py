@@ -38,11 +38,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from .config_loader_base import ConfigLoaderBase
 from .computed_default_value import ComputedDefaultValue
+from .config_loader_base import ConfigLoaderBase
 from ..processutils import latest_system_clang_tool, run_command
-from ..utils import (cached_property, ConfigBase, DoNotUseInIfStmt, have_working_internet_connection, status_update,
-                     warning_message)
+from ..utils import (
+    ConfigBase,
+    DoNotUseInIfStmt,
+    cached_property,
+    fatal_error,
+    have_working_internet_connection,
+    status_update,
+    warning_message,
+)
 
 
 class BuildType(Enum):
@@ -135,8 +142,15 @@ def _skip_dependency_filter_arg(values: "list[str]") -> "list[re.Pattern]":
     return result
 
 
+class CheribuildActionEnum(Enum):
+    option_name: str
+    help_message: str
+    altname: str
+    actions: "list[CheribuildActionEnum]"
+
+
 class CheriConfig(ConfigBase):
-    def __init__(self, loader, action_class) -> None:
+    def __init__(self, loader, action_class: "type[CheribuildActionEnum]") -> None:
         super().__init__(pretend=DoNotUseInIfStmt(), verbose=DoNotUseInIfStmt(), quiet=DoNotUseInIfStmt(),
                          force=DoNotUseInIfStmt())
         self._cached_deps = collections.defaultdict(dict)
@@ -148,9 +162,10 @@ class CheriConfig(ConfigBase):
                                                                help="Only print the commands instead of running them")
 
         # add the actions:
+        self._action_class = action_class
         self.action = loader.add_option("action", default=[], action="append", type=action_class, help_hidden=True,
                                         help="The action to perform by cheribuild", group=loader.action_group)
-        self.default_action = None
+        self.default_action: Optional[CheribuildActionEnum] = None
         # Add aliases (e.g. --test = --action=test):
         for action in action_class:
             if action.altname:
@@ -221,7 +236,7 @@ class CheriConfig(ConfigBase):
         self.allow_running_as_root = loader.add_bool_option("allow-running-as-root", help_hidden=True, default=False,
                                                             help="Allow running cheribuild as root (not recommended!)")
         # Attributes for code completion:
-        self.verbose = None  # type: Optional[bool]
+        self.verbose: Optional[bool] = None
         self.debug_output = loader.add_commandline_only_bool_option("debug-output", "vv",
                                                                     help="Extremely verbose output")
         self.quiet: "Optional[bool] " = None
@@ -286,11 +301,11 @@ class CheriConfig(ConfigBase):
             help="When building with --include-dependencies ignore the SDK dependencies. Saves a lot of time "
                  "when building libc++, etc. with dependencies but the sdk is already up-to-date. "
                  "This is like --no-include-toolchain-depedencies but also skips the target that builds the sysroot.")
-        self.skip_dependency_filters = loader.add_option(
+        self.skip_dependency_filters: "list[re.Pattern]" = loader.add_option(
             "skip-dependency-filter", group=loader.dependencies_group, action="append", default=[],
             type=_skip_dependency_filter_arg, metavar="REGEX",
             help="A regular expression to match against to target names that should be skipped when using"
-                 "--include-dependency. Can be passed multiple times to add more patterns.")  # type: list[re.Pattern]
+                 "--include-dependency. Can be passed multiple times to add more patterns.")
         self.trap_on_unrepresentable = loader.add_bool_option(
             "trap-on-unrepresentable", default=False, group=loader.run_group,
             help="Raise a CHERI exception when capabilities become unreprestable instead of detagging. Useful for "
@@ -301,28 +316,28 @@ class CheriConfig(ConfigBase):
         self.qemu_debug_program = loader.add_option(
             "qemu-gdb-debug-userspace-program", group=loader.run_group,
             help="Print the command to debug the following userspace program in GDB attaced to QEMU")
-        self.include_dependencies = None  # type: Optional[bool]
+        self.include_dependencies: Optional[bool] = None
         self.include_toolchain_dependencies = True
         self.enable_hybrid_targets = False
         self.only_dependencies = loader.add_bool_option("only-dependencies",
                                                         help="Only build dependencies of targets, "
                                                              "not the targets themselves")
-        self.start_with = None  # type: Optional[str]
-        self.start_after = None  # type: Optional[str]
-        self.make_without_nice = None  # type: Optional[bool]
+        self.start_with: Optional[str] = None
+        self.start_after: Optional[str] = None
+        self.make_without_nice: Optional[bool] = None
 
         self.mips_cheri_bits = 128  # Backwards compat
-        self.make_jobs = None  # type: Optional[int]
+        self.make_jobs: Optional[int] = None
 
-        self.source_root = None  # type: Optional[Path]
-        self.output_root = None  # type: Optional[Path]
-        self.build_root = None  # type: Optional[Path]
+        self.source_root: Optional[Path] = None
+        self.output_root: Optional[Path] = None
+        self.build_root: Optional[Path] = None
         # Path to kernel/disk images (this is the same as output_root by default but different in Jenkins)
-        self.cheribsd_image_root = None  # type: Optional[Path]
-        self.cheri_sdk_dir = None  # type: Optional[Path]
-        self.morello_sdk_dir = None  # type: Optional[Path]
-        self.other_tools_dir = None  # type: Optional[Path]
-        self.sysroot_output_root = None  # type: Optional[Path]
+        self.cheribsd_image_root: Optional[Path] = None
+        self.cheri_sdk_dir: Optional[Path] = None
+        self.morello_sdk_dir: Optional[Path] = None
+        self.other_tools_dir: Optional[Path] = None
+        self.sysroot_output_root: Optional[Path] = None
         self.docker = loader.add_bool_option("docker", help="Run the build inside a docker container",
                                              group=loader.docker_group)
         self.docker_container = loader.add_option("docker-container", help="Name of the docker container to use",
@@ -333,7 +348,7 @@ class CheriConfig(ConfigBase):
                                                                   "a container name")
 
         # compilation db options:
-        self.create_compilation_db = loader.add_commandline_only_bool_option(
+        self.create_compilation_db = loader.add_bool_option(
             "compilation-db", "-cdb", help="Create a compile_commands.json file in the build dir "
                                            "(requires Bear for non-CMake projects)")
         self.copy_compilation_db_to_source_dir = None  # False for jenkins, an option for cheribuild
@@ -355,10 +370,10 @@ class CheriConfig(ConfigBase):
                                                          "targets ignore this flag.")
 
         # Test options:
-        self._test_ssh_key = loader.add_path_option("test-ssh-key", default=None, group=loader.tests_group,
-                                                    help="The SSH key to used to connect to the QEMU instance when "
-                                                         "running tests on CheriBSD. If not specified a key will be "
-                                                         "generated in the build-root directory on-demand.")
+        self._test_ssh_key = loader.add_optional_path_option(
+            "test-ssh-key", group=loader.tests_group,
+            help="The SSH key to used to connect to the QEMU instance when running tests on CheriBSD. If not specified"
+                 " a key will be generated in the build-root directory on-demand.")
         self.use_minimal_benchmark_kernel = loader.add_bool_option("use-minimal-benchmark-kernel",
                                                                    help="Use a CHERI BENCHMARK version of the "
                                                                         "cheribsd-mfs-root-kernel (without "
@@ -385,8 +400,8 @@ class CheriConfig(ConfigBase):
                                                                       help="Don't actually run the tests. Instead "
                                                                            "setup a QEMU instance with the right "
                                                                            "paths set up.")
-        self.test_ld_preload = loader.add_path_option("test-ld-preload", group=loader.tests_group,
-                                                      help="Preload the given library before running tests")
+        self.test_ld_preload = loader.add_optional_path_option("test-ld-preload", group=loader.tests_group,
+                                                               help="Preload the given library before running tests")
 
         self.benchmark_fpga_extra_args = loader.add_commandline_only_option(
             "benchmark-fpga-extra-args", group=loader.benchmark_group, type=list, metavar="ARGS",
@@ -404,7 +419,7 @@ class CheriConfig(ConfigBase):
         self.benchmark_statcounters_suffix = loader.add_option(
             "benchmark-csv-suffix", group=loader.benchmark_group,
             help="Add a custom suffix for the statcounters CSV.")
-        self.benchmark_ld_preload = loader.add_path_option(
+        self.benchmark_ld_preload = loader.add_optional_path_option(
             "benchmark-ld-preload", group=loader.benchmark_group,
             help="Preload the given library before running benchmarks")
         self.benchmark_with_debug_kernel = loader.add_bool_option(
@@ -426,7 +441,7 @@ class CheriConfig(ConfigBase):
             help="Perform a shallow `git clone` when cloning new projects. This can save a lot of time for large"
                  "repositories such as FreeBSD or LLVM. Use `git fetch --unshallow` to convert to a non-shallow clone")
 
-        self.fpga_custom_env_setup_script = loader.add_path_option(
+        self.fpga_custom_env_setup_script = loader.add_optional_path_option(
             "beri-fpga-env-setup-script", group=loader.path_group,
             help="Custom script to source to setup PATH and quartus, default to using cheri-cpu/cheri/setup.sh")
 
@@ -449,8 +464,9 @@ class CheriConfig(ConfigBase):
             "remote-morello-board", help="SSH hostname of a Morello board. When set, some projects will run their "
                                          "test suites on the remote board instead of QEMU.")
 
-        self.targets = None  # type: typing.Optional[typing.List[str]]
-        self.__optional_properties = ["internet_connection_last_checked_at", "start_after", "start_with"]
+        self.targets: "Optional[list[str]]" = None
+        self.__optional_properties = ["internet_connection_last_checked_at", "start_after", "start_with",
+                                      "default_action"]
 
     def load(self) -> None:
         self.loader.load()
@@ -476,7 +492,9 @@ class CheriConfig(ConfigBase):
 
         # flatten the potentially nested list
         if not self.action:
-            assert self.default_action is not None
+            if self.default_action is None:
+                fatal_error("Missing action, please pass one of",
+                            ", ".join([str(action.option_name) for action in self._action_class]), pretend=False)
             self.action = [self.default_action]
         else:
             assert isinstance(self.action, list)

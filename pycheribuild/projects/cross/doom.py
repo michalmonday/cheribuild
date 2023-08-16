@@ -29,11 +29,12 @@ from .crosscompileproject import CrossCompileAutotoolsProject, CrossCompileProje
 from ..project import ExternallyManagedSourceRepository, GitRepository
 
 
-class BuildChocolate_Doom(CrossCompileAutotoolsProject):
+class BuildChocolateDoom(CrossCompileAutotoolsProject):
+    target = "chocolate-doom"
     repository = GitRepository("https://github.com/chocolate-doom/chocolate-doom.git",
                                old_urls=[b"https://github.com/jrtc27/chocolate-doom.git"],
                                default_branch="master", force_branch=True)
-    dependencies = ["sdl", "sdl-mixer", "sdl-net", "libpng"]
+    dependencies = ("sdl", "sdl-mixer", "sdl-net", "libpng")
 
     def configure(self, **kwargs):
         self.run_cmd("autoreconf", "-fi", cwd=self.source_dir)
@@ -42,18 +43,18 @@ class BuildChocolate_Doom(CrossCompileAutotoolsProject):
 
 class BuildFreedoom(CrossCompileProject):
     repository = ExternallyManagedSourceRepository()
-    dependencies = ["chocolate-doom"]
+    dependencies = ("chocolate-doom",)
 
     version = "0.12.1"
-    url_prefix: str = "https://github.com/freedoom/freedoom/releases/download/v{0}/".format(version)
+    url_prefix: str = f"https://github.com/freedoom/freedoom/releases/download/v{version}/"
     packages: "dict[str, list[str]]" = {
         'freedoom': ['freedoom1', 'freedoom2'],
-        'freedm': ['freedm']
+        'freedm': ['freedm'],
     }
 
     def compile(self, **kwargs):
         for pkgname, wads in self.packages.items():
-            filename = "{0}-{1}.zip".format(pkgname, self.version)
+            filename = f"{pkgname}-{self.version}.zip"
             wadfiles = ['*/' + wad + ".wad" for wad in wads]
             if not (self.build_dir / filename).is_file():
                 self.download_file(self.build_dir / filename, self.url_prefix + filename)

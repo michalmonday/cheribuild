@@ -33,17 +33,16 @@ import typing
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
-from typing import Optional, ClassVar
+from typing import ClassVar, Optional
 
-from .chericonfig import CheriConfig, AArch64FloatSimdOptions, MipsFloatAbi
-from ..utils import cached_property, final, OSInfo, warning_message, status_update, fatal_error
+from .chericonfig import AArch64FloatSimdOptions, CheriConfig, MipsFloatAbi
 from ..filesystemutils import FileSystemUtils
-from ..processutils import get_compiler_info, CompilerInfo
-
+from ..processutils import CompilerInfo, get_compiler_info
+from ..utils import OSInfo, cached_property, fatal_error, final, status_update, warning_message
 
 __all__ = ["AbstractProject", "AArch64FloatSimdOptions", "AutoVarInit", "BasicCompilationTargets",  # no-combine
            "CPUArchitecture",  "CrossCompileTarget", "CompilerType", "MipsFloatAbi", "TargetInfo",  # no-combine
-           "NativeTargetInfo"]  # no-combine
+           "NativeTargetInfo", "DefaultInstallDir"]  # no-combine
 
 
 class CPUArchitecture(Enum):
@@ -120,6 +119,28 @@ class AutoVarInit(Enum):
             raise NotImplementedError()
 
 
+class DefaultInstallDir(Enum):
+    DO_NOT_INSTALL = "Should not be installed"
+    IN_BUILD_DIRECTORY = "$BUILD_DIR/test-install-prefix"
+    # Note: ROOTFS_LOCALBASE will be searched for libraries, ROOTFS_OPTBASE will not. The former should be used for
+    # libraries that will be used by other programs, and the latter should be used for standalone programs (such as
+    # PostgreSQL or WebKit).
+    # Note: for ROOTFS_OPTBASE, the path_in_rootfs attribute can be used to override the default of /opt/...
+    # This also works for ROOTFS_LOCALBASE
+    ROOTFS_OPTBASE = "The rootfs for this target (<rootfs>/opt/<arch>/<program> by default)"
+    ROOTFS_LOCALBASE = "The sysroot for this target (<rootfs>/usr/local/<arch> by default)"
+    KDE_PREFIX = "The sysroot for this target (<rootfs>/opt/<arch>/kde by default)"
+    CHERI_SDK = "The CHERI SDK directory"
+    MORELLO_SDK = "The Morello SDK directory"
+    BOOTSTRAP_TOOLS = "The bootstap tools directory"
+    CUSTOM_INSTALL_DIR = "Custom install directory"
+    SYSROOT_FOR_BAREMETAL_ROOTFS_OTHERWISE = "Sysroot for baremetal projects, rootfs otherwise"
+
+
+_INVALID_INSTALL_DIR: Path = Path("/this/dir/should/be/overwritten/and/not/used/!!!!")
+_DO_NOT_INSTALL_PATH: Path = Path("/this/project/should/not/be/installed!!!!")
+
+
 class AbstractProject(FileSystemUtils):
     """A base class for (Simple)Project that exposes only the fields/methods needed in target_info."""
     _xtarget: "ClassVar[Optional[CrossCompileTarget]]" = None
@@ -144,10 +165,10 @@ class AbstractProject(FileSystemUtils):
     def get_compiler_info(self, compiler: Path) -> CompilerInfo:
         return get_compiler_info(compiler, config=self.config)
 
-    @staticmethod
-    def info(*args, **kwargs) -> None:
+    def info(self, *args, **kwargs) -> None:
         # TODO: move all those methods here
-        status_update(*args, **kwargs)
+        if not self.config.quiet:
+            status_update(*args, **kwargs)
 
     @staticmethod
     def warning(*args, **kwargs) -> None:
@@ -186,7 +207,7 @@ class TargetInfo(ABC):
     def cmake_processor_id(self) -> str:
         if self.target.is_mips(include_purecap=True):
             if self.target.is_cheri_purecap():
-                return "CHERI (MIPS IV compatible) with {}-bit capabilities".format(self.config.mips_cheri_bits_str)
+                return f"CHERI (MIPS IV compatible) with {self.config.mips_cheri_bits_str}-bit capabilities"
             else:
                 return "BERI (MIPS IV compatible)"
         if self.target.is_aarch64(include_purecap=True):
@@ -199,7 +220,7 @@ class TargetInfo(ABC):
         ...
 
     @property
-    def toolchain_system_version(self) -> "typing.Optional[str]":
+    def toolchain_system_version(self) -> "Optional[str]":
         return None
 
     def cmake_prefix_paths(self, config: "CheriConfig") -> "list[Path]":
@@ -281,15 +302,15 @@ class TargetInfo(ABC):
     @abstractmethod
     def essential_compiler_and_linker_flags_impl(cls, instance: "TargetInfo", *, xtarget: "CrossCompileTarget",
                                                  perform_sanity_checks=True, default_flags_only=False,
-                                                 softfloat: bool = None) -> "list[str]":
+                                                 softfloat: Optional[bool] = None) -> "list[str]":
         """
         :return: flags such as -target + -mabi which are needed for both compiler and linker
         """
         ...
 
-    def get_essential_compiler_and_linker_flags(self, xtarget: "CrossCompileTarget" = None,
+    def get_essential_compiler_and_linker_flags(self, xtarget: "Optional[CrossCompileTarget]" = None,
                                                 perform_sanity_checks=True, default_flags_only=False,
-                                                softfloat: bool = None) -> "list[str]":
+                                                softfloat: Optional[bool] = None) -> "list[str]":
         return self.essential_compiler_and_linker_flags_impl(self, perform_sanity_checks=perform_sanity_checks,
                                                              xtarget=xtarget if xtarget is not None else self.target,
                                                              default_flags_only=default_flags_only, softfloat=softfloat)
@@ -313,6 +334,16 @@ class TargetInfo(ABC):
         """Relative path from the root to LOCALBASE (usr/local on FreeBSD)"""
         raise RuntimeError("Should only be called for FreeBSD targets")
 
+    def default_install_dir(self, install_dir: DefaultInstallDir) -> Path:
+        if install_dir == DefaultInstallDir.DO_NOT_INSTALL:
+            return _DO_NOT_INSTALL_PATH
+        elif install_dir == DefaultInstallDir.IN_BUILD_DIRECTORY:
+            # noinspection PyUnresolvedReferences
+            return self.project.build_dir / "test-install-prefix"  # pytype: disable=attribute-error
+        elif install_dir == DefaultInstallDir.CUSTOM_INSTALL_DIR:
+            return _INVALID_INSTALL_DIR
+        raise NotImplementedError(f"Unsupported {install_dir} for {self}")
+
     @property
     @abstractmethod
     def c_preprocessor(self) -> Path:
@@ -320,30 +351,30 @@ class TargetInfo(ABC):
 
     @classmethod
     @abstractmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> "list[str]":
         """returns e.g. [llvm]/[upstream-llvm], or an empty list"""
         ...
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> "list[str]":
         """returns a list of targets that need to be built for a minimal sysroot"""
         return []
 
-    def default_initial_compile_flags(self) -> typing.List[str]:
+    def default_initial_compile_flags(self) -> "list[str]":
         """Flags that need to be passed to cc/c++/cpp in all cases"""
         return []
 
     # noinspection PyMethodMayBeStatic
-    def required_link_flags(self) -> typing.List[str]:
+    def required_link_flags(self) -> "list[str]":
         """Flags that need to be passed to cc/c++ for linking"""
         return []
 
     @property
-    def pkgconfig_dirs(self) -> "typing.List[str]":
+    def pkgconfig_dirs(self) -> "list[str]":
         return []  # whatever the default is
 
     @property
-    def pkg_config_libdir_override(self) -> "typing.Optional[str]":
+    def pkg_config_libdir_override(self) -> "Optional[str]":
         raise ValueError("Should only be called for native")
 
     @property
@@ -366,7 +397,7 @@ class TargetInfo(ABC):
 
     @final
     def get_rootfs_project(self, *, t: "type[_AnyProject]", caller: AbstractProject,
-                           xtarget: "CrossCompileTarget" = None) -> _AnyProject:
+                           xtarget: "Optional[CrossCompileTarget]" = None) -> _AnyProject:
         if xtarget is None:
             xtarget = self.target
         xtarget = xtarget.get_rootfs_target()
@@ -486,17 +517,37 @@ class NativeTargetInfo(TargetInfo):
         raise ValueError("Should not be called for native")
 
     @classmethod
-    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
+    def base_sysroot_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> "list[str]":
         raise ValueError("Should not be called for native")
 
     @classmethod
-    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> typing.List[str]:
+    def toolchain_targets(cls, target: "CrossCompileTarget", config: CheriConfig) -> "list[str]":
         if config.use_sdk_clang_for_native_xbuild:
             return ["llvm-native"]
         return []  # use host tools -> no target needed
 
     def get_target_triple(self, *, include_version: bool) -> str:
         return self.project.get_compiler_info(self.c_compiler).default_target
+
+    def default_install_dir(self, install_dir: DefaultInstallDir) -> Path:
+        config = self.config
+        if install_dir == DefaultInstallDir.ROOTFS_OPTBASE:
+            raise ValueError("Should not use DefaultInstallDir.ROOTFS_OPTBASE for native builds!")
+        elif install_dir == DefaultInstallDir.KDE_PREFIX:
+            if self._is_libcompat_target:
+                return config.output_root / ("kde-compat" + self._compat_abi_suffix)
+            return self.config.output_root / "kde"
+        elif install_dir == DefaultInstallDir.ROOTFS_LOCALBASE:
+            if self._is_libcompat_target:
+                return config.output_root / ("local" + self._compat_abi_suffix)
+            return config.output_root / "local"
+        elif install_dir == DefaultInstallDir.CHERI_SDK:
+            return config.cheri_sdk_dir
+        elif install_dir == DefaultInstallDir.MORELLO_SDK:
+            return config.morello_sdk_dir
+        elif install_dir == DefaultInstallDir.BOOTSTRAP_TOOLS:
+            return config.other_tools_dir
+        return super().default_install_dir(install_dir)
 
     @property
     def c_compiler(self) -> Path:
@@ -570,6 +621,10 @@ class NativeTargetInfo(TargetInfo):
         return "lib"
 
     @cached_property
+    def _is_libcompat_target(self) -> bool:
+        return _is_native_purecap() and not self.target.is_cheri_purecap()
+
+    @cached_property
     def _compat_abi_suffix(self) -> str:
         assert self.is_freebsd()
         # Directory suffix for compat ABI (currently only "64"/"" should be valid)
@@ -587,7 +642,7 @@ class NativeTargetInfo(TargetInfo):
         raise NotImplementedError("Should only be called for FreeBSD targets")
 
     @cached_property
-    def pkg_config_libdir_override(self) -> "typing.Optional[str]":
+    def pkg_config_libdir_override(self) -> "Optional[str]":
         if OSInfo.is_cheribsd():
             # When building natively on CheriBSD with pkg-config installed using pkg64, the default pkg-config
             # search path will use the non-CHERI libraries in /usr/local64. We could avoid this override in cases
@@ -599,7 +654,7 @@ class NativeTargetInfo(TargetInfo):
         return None  # use the default value for non-CheriBSD
 
     @property
-    def pkgconfig_dirs(self) -> "typing.List[str]":
+    def pkgconfig_dirs(self) -> "list[str]":
         # We need to add the bootstrap tools pkgconfig dirs to PKG_CONFIG_PATH to find e.g. libxml2, etc.
         # Note: some packages also install to libdata/pkgconfig or share/pkgconfig
         # NB: We don't want to look in this directory when building forced hybrid targets such as GDB:
@@ -620,7 +675,7 @@ class NativeTargetInfo(TargetInfo):
     @classmethod
     def essential_compiler_and_linker_flags_impl(cls, instance: "TargetInfo", *, xtarget: "CrossCompileTarget",
                                                  perform_sanity_checks=True, default_flags_only=False,
-                                                 softfloat: bool = None) -> "list[str]":
+                                                 softfloat: Optional[bool] = None) -> "list[str]":
         result = []
         if instance.project.auto_var_init != AutoVarInit.NONE:
             compiler = instance.project.get_compiler_info(instance.c_compiler)
@@ -643,19 +698,21 @@ class NativeTargetInfo(TargetInfo):
         return result  # default host compiler should not need any extra flags
 
 
-class CrossCompileTarget(object):
+class CrossCompileTarget:
     # Currently the same for all targets
     DEFAULT_SUBOBJECT_BOUNDS: str = "conservative"
 
-    def __init__(self, arch_suffix: str, cpu_architecture: CPUArchitecture, target_info_cls: "typing.Type[TargetInfo]",
+    def __init__(self, arch_suffix: str, cpu_architecture: CPUArchitecture, target_info_cls: "type[TargetInfo]",
                  *, is_cheri_purecap=False, is_cheri_hybrid=False, extra_target_suffix: str = "",
-                 check_conflict_with: "CrossCompileTarget" = None, rootfs_target: "CrossCompileTarget" = None,
-                 non_cheri_target: "CrossCompileTarget" = None, hybrid_target: "CrossCompileTarget" = None,
-                 purecap_target: "CrossCompileTarget" = None,
-                 non_cheri_for_hybrid_rootfs_target: "CrossCompileTarget" = None,
-                 non_cheri_for_purecap_rootfs_target: "CrossCompileTarget" = None,
-                 hybrid_for_purecap_rootfs_target: "CrossCompileTarget" = None,
-                 purecap_for_hybrid_rootfs_target: "CrossCompileTarget" = None) -> None:
+                 check_conflict_with: "Optional[CrossCompileTarget]" = None,
+                 rootfs_target: "Optional[CrossCompileTarget]" = None,
+                 non_cheri_target: "Optional[CrossCompileTarget]" = None,
+                 hybrid_target: "Optional[CrossCompileTarget]" = None,
+                 purecap_target: "Optional[CrossCompileTarget]" = None,
+                 non_cheri_for_hybrid_rootfs_target: "Optional[CrossCompileTarget]" = None,
+                 non_cheri_for_purecap_rootfs_target: "Optional[CrossCompileTarget]" = None,
+                 hybrid_for_purecap_rootfs_target: "Optional[CrossCompileTarget]" = None,
+                 purecap_for_hybrid_rootfs_target: "Optional[CrossCompileTarget]" = None) -> None:
         assert not arch_suffix.startswith("-"), arch_suffix
         assert not extra_target_suffix or extra_target_suffix.startswith("-"), extra_target_suffix
         name_prefix = target_info_cls.shortname
@@ -710,7 +767,7 @@ class CrossCompileTarget(object):
                 getattr(other_target, attr)._set_from(self)
 
     # Set the related targets:
-    def _set_for(self, other_target: "typing.Optional[CrossCompileTarget]", also_set_other=True) -> None:
+    def _set_for(self, other_target: "Optional[CrossCompileTarget]", also_set_other=True) -> None:
         if other_target is not None and self is not other_target:
             if self._is_cheri_hybrid:
                 if self._rootfs_target is not None:
@@ -796,7 +853,7 @@ class CrossCompileTarget(object):
         assert self.target_info_cls is not None
         return self.target_info_cls.is_native()
 
-    def _check_arch(self, arch: CPUArchitecture, include_purecap: "typing.Optional[bool]") -> bool:
+    def _check_arch(self, arch: CPUArchitecture, include_purecap: "Optional[bool]") -> bool:
         if self.cpu_architecture is not arch:
             return False
         if include_purecap is None:
@@ -807,31 +864,31 @@ class CrossCompileTarget(object):
         return True
 
     # Querying the CPU architecture:
-    def is_mips(self, include_purecap: bool = None) -> bool:
+    def is_mips(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.MIPS64, include_purecap)
 
-    def is_riscv32(self, include_purecap: bool = None) -> bool:
+    def is_riscv32(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.RISCV32, include_purecap)
 
-    def is_riscv64(self, include_purecap: bool = None) -> bool:
+    def is_riscv64(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.RISCV64, include_purecap)
 
-    def is_riscv(self, include_purecap: bool = None) -> bool:
+    def is_riscv(self, include_purecap: Optional[bool] = None) -> bool:
         return self.is_riscv32(include_purecap) or self.is_riscv64(include_purecap)
 
-    def is_aarch64(self, include_purecap: bool = None) -> bool:
+    def is_aarch64(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.AARCH64, include_purecap)
 
-    def is_i386(self, include_purecap: bool = None) -> bool:
+    def is_i386(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.I386, include_purecap)
 
-    def is_x86_64(self, include_purecap: bool = None) -> bool:
+    def is_x86_64(self, include_purecap: Optional[bool] = None) -> bool:
         return self._check_arch(CPUArchitecture.X86_64, include_purecap)
 
-    def is_any_x86(self, include_purecap: bool = None) -> bool:
+    def is_any_x86(self, include_purecap: Optional[bool] = None) -> bool:
         return self.is_i386(include_purecap) or self.is_x86_64(include_purecap)
 
-    def is_cheri_purecap(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
+    def is_cheri_purecap(self, valid_cpu_archs: "Optional[list[CPUArchitecture]]" = None) -> bool:
         if valid_cpu_archs is None:
             return self._is_cheri_purecap
         if not self._is_cheri_purecap:
@@ -842,7 +899,7 @@ class CrossCompileTarget(object):
                 return True
         return False
 
-    def is_cheri_hybrid(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
+    def is_cheri_hybrid(self, valid_cpu_archs: "Optional[list[CPUArchitecture]]" = None) -> bool:
         if valid_cpu_archs is None:
             return self._is_cheri_hybrid
         if not self._is_cheri_hybrid:
@@ -853,7 +910,7 @@ class CrossCompileTarget(object):
                 return True
         return False
 
-    def is_hybrid_or_purecap_cheri(self, valid_cpu_archs: "typing.List[CPUArchitecture]" = None) -> bool:
+    def is_hybrid_or_purecap_cheri(self, valid_cpu_archs: "Optional[list[CPUArchitecture]]" = None) -> bool:
         return self.is_cheri_purecap(valid_cpu_archs) or self.is_cheri_hybrid(valid_cpu_archs)
 
     def get_rootfs_target(self) -> "CrossCompileTarget":
@@ -968,9 +1025,11 @@ class BasicCompilationTargets:
         NATIVE_HYBRID = CrossCompileTarget("native-hybrid", _native_cpu_arch(), NativeTargetInfo, is_cheri_hybrid=True,
                                            purecap_target=NATIVE, check_conflict_with=NATIVE)
         NATIVE_NON_PURECAP = NATIVE_HYBRID
+        ALL_NATIVE = (NATIVE, NATIVE_HYBRID)
     else:
         NATIVE = CrossCompileTarget("native", _native_cpu_arch(), NativeTargetInfo)
         NATIVE_NON_PURECAP = NATIVE
-    NATIVE_IF_FREEBSD = [NATIVE] if OSInfo.IS_FREEBSD else []
-    NATIVE_IF_LINUX = [NATIVE] if OSInfo.IS_LINUX else []
-    NATIVE_IF_MACOS = [NATIVE] if OSInfo.IS_MAC else []
+        ALL_NATIVE = (NATIVE, )
+    NATIVE_IF_FREEBSD = ALL_NATIVE if OSInfo.IS_FREEBSD else tuple()
+    NATIVE_IF_LINUX = ALL_NATIVE if OSInfo.IS_LINUX else tuple()
+    NATIVE_IF_MACOS = ALL_NATIVE if OSInfo.IS_MAC else tuple()

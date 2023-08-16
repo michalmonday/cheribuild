@@ -32,14 +32,22 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from .crosscompileproject import (BuildType, CheriConfig, CompilationTargets, CrossCompileAutotoolsProject,
-                                  CrossCompileCMakeProject, CrossCompileMesonProject, CrossCompileProject,
-                                  DefaultInstallDir, GitRepository, MakeCommandKind)
+from .crosscompileproject import (
+    BuildType,
+    CheriConfig,
+    CompilationTargets,
+    CrossCompileAutotoolsProject,
+    CrossCompileCMakeProject,
+    CrossCompileMesonProject,
+    CrossCompileProject,
+    DefaultInstallDir,
+    GitRepository,
+    MakeCommandKind,
+)
 from .wayland import BuildWayland
 from .x11 import BuildLibXCB
 from ..project import default_source_dir_in_subdir
 from ..simple_project import SimpleProject
-from ...processutils import set_env
 from ...utils import InstallInstructions
 
 
@@ -114,7 +122,7 @@ class BuildSharedMimeInfo(CrossCompileMesonProject):
         super().setup()
         self.add_meson_options(**{
             "update-mimedb": True,
-            "build-tools": self._can_build_tools
+            "build-tools": self._can_build_tools,
         })
         if not self._can_build_tools:
             # Ensure that we have update-mime-database available as it will be used in a post-install action.
@@ -134,8 +142,6 @@ class BuildQtWithConfigureScript(CrossCompileProject):
     add_host_target_build_config_options = False
     # Should not be needed, but it seems like some of the tests are broken otherwise
     make_kind = MakeCommandKind.GnuMake
-    needs_mxcaptable_static = True  # Currently over the limit, maybe we need -ffunction-sections/-fdata-sections
-    hide_options_from_help = True  # hide this for now
     default_build_type = BuildType.MINSIZERELWITHDEBINFO  # Default to -Os with debug info:
     use_x11: bool
     use_opengl: bool
@@ -153,13 +159,13 @@ class BuildQtWithConfigureScript(CrossCompileProject):
             return self.build_dir / "qt-host-tools"
 
     @classmethod
-    def dependencies(cls, config: CheriConfig) -> "list[str]":
-        deps = super().dependencies(config)
+    def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
+        deps = list(super().dependencies(config))
         rootfs_target = cls.get_crosscompile_target().get_rootfs_target()
         deps.append(BuildSharedMimeInfo.get_class_for_target(rootfs_target).target)
         deps.append("sqlite")  # TODO: minimal should probably not include QtSql
         if cls.minimal:
-            return deps
+            return tuple(deps)
         if cls.use_x11:
             # The system X11 libraries might be too old, so add the cheribuild-provided ones as a dependency
             deps.extend(["libx11", "libxcb", "libxkbcommon", "libxcb-cursor", "libxcb-util", "libxcb-image", "libice",
@@ -175,7 +181,7 @@ class BuildQtWithConfigureScript(CrossCompileProject):
             deps.extend(["dbus", "fontconfig", "libinput"])
             if cls.use_opengl:
                 deps.extend(["libglvnd", "libdrm"])
-        return deps
+        return tuple(deps)
 
     @classmethod
     def can_build_with_ccache(cls):
@@ -238,7 +244,7 @@ class BuildQtWithConfigureScript(CrossCompileProject):
         else:
             # make sure we use libc++ (only happens with mips64-unknown-freebsd10 and greater)
             compiler_flags = self.default_compiler_flags
-            linker_flags = self.default_ldflags + ["-target", self.target_info.target_triple]
+            linker_flags = [*self.default_ldflags, "-target", self.target_info.target_triple]
 
             # The build system already passes these:
             linker_flags = filter(lambda s: not s.startswith("--sysroot"), linker_flags)
@@ -246,7 +252,7 @@ class BuildQtWithConfigureScript(CrossCompileProject):
             cross_tools_prefix = self.target_info.get_target_triple(include_version=False)
             self.configure_args.extend([
                 "-device", "freebsd-generic-clang",
-                "-device-option", "CROSS_COMPILE={}/{}-".format(self.sdk_bindir, cross_tools_prefix),
+                "-device-option", f"CROSS_COMPILE={self.sdk_bindir}/{cross_tools_prefix}-",
                 "-device-option", "COMPILER_FLAGS=" + self.commandline_to_str(compiler_flags),
                 "-device-option", "LINKER_FLAGS=" + self.commandline_to_str(linker_flags),
                 "-sysroot", self.cross_sysroot_path,
@@ -280,7 +286,7 @@ class BuildQtWithConfigureScript(CrossCompileProject):
             "-no-headersclean",
             # Don't embed the mimetype DB in libQt5Core.so. It's huge and results in lots XML parsing. Instead, we just
             # ensure that the binary cache exists in the disk image.
-            "-no-mimetype-database"
+            "-no-mimetype-database",
         ])
         if self.build_tests:
             self.configure_args.append("-developer-build")
@@ -370,15 +376,9 @@ class BuildQtBaseDev(CrossCompileCMakeProject):
     is_large_source_repository = True
     default_source_dir = default_source_dir_in_subdir(Path("qt5"))
     # native_install_dir = DefaultInstallDir.CHERI_SDK
-    needs_mxcaptable_static = True  # Currently over the limit, maybe we need -ffunction-sections/-fdata-sections
     # default_build_type = BuildType.MINSIZERELWITHDEBINFO  # Default to -Os with debug info:
     default_build_type = BuildType.RELWITHDEBINFO
     needs_native_build_for_crosscompile = True
-
-    @property
-    def needs_mxcaptable_dynamic(self):
-        # Debug build: 35927 entries to .captable but current maximum is 32768
-        return self.build_type == BuildType.DEBUG
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -527,7 +527,7 @@ if (! %modules) {
 }
 for my $module (keys %modules) {
     print "$module\n";
-}""", capture_output=True, run_in_pretend_mode=self.source_dir.exists(), cwd=self.source_dir)
+}""", capture_output=True, run_in_pretend_mode=self.source_dir.exists() and shutil.which("perl"), cwd=self.source_dir)
         if not modules_cmd.stdout.strip():
             self.fatal("Coulnd't parse list of Qt Modules")
         for module in modules_cmd.stdout.decode("utf-8").strip().split():
@@ -585,7 +585,7 @@ for my $module (keys %modules) {
             # tst_QDate::startOfDay_endOfDay(epoch) is broken in BST (at least on macOS), use Europe/Oslo to match the
             # official CI.
             # Possibly similar to https://bugreports.qt.io/browse/QTBUG-87662
-            with set_env(TZ="Europe/Oslo"):
+            with self.set_env(TZ="Europe/Oslo"):
                 self.run_cmd("make", "check", cwd=self.build_dir)
         else:
             # We run tests using the full disk image since we want e.g. locales to be available.
@@ -602,7 +602,7 @@ class BuildQtModuleWithQMake(CrossCompileProject):
     native_install_dir = BuildQtBase.native_install_dir
     do_not_add_to_targets = True
     can_run_parallel_install = True
-    dependencies = ["qtbase"]
+    dependencies = ("qtbase",)
     default_source_dir = default_source_dir_in_subdir(Path("qt5"))
 
     def setup(self):
@@ -664,7 +664,7 @@ class BuildQtDeclarative(BuildQtModuleWithQMake):
 
 class BuildQtTools(BuildQtModuleWithQMake):
     target = "qttools"
-    dependencies = ["qtbase"]
+    dependencies = ("qtbase",)
     repository = GitRepository("https://code.qt.io/qt/qttools.git",
                                # "https://invent.kde.org/qt/qt/qttools.git",
                                default_branch="5.15", force_branch=True)
@@ -685,7 +685,7 @@ class BuildQtTools(BuildQtModuleWithQMake):
 
 class BuildQtWayland(BuildQtModuleWithQMake):
     target = "qtwayland"
-    dependencies = ["qtbase", "wayland", "wayland-native"]
+    dependencies = ("qtbase", "wayland", "wayland-native")
     repository = GitRepository("https://code.qt.io/qt/qtwayland.git",
                                temporary_url_override="https://github.com/CTSRD-CHERI/qtwayland",
                                url_override_reason="Needs a patch to build on FreeBSD",
@@ -710,7 +710,7 @@ class BuildQtWayland(BuildQtModuleWithQMake):
 
 class BuildQtQuickControls2(BuildQtModuleWithQMake):
     target = "qtquickcontrols2"
-    dependencies = ["qtdeclarative"]
+    dependencies = ("qtdeclarative",)
     repository = GitRepository("https://invent.kde.org/qt/qt/qtquickcontrols2.git",
                                old_urls=[b"https://code.qt.io/qt/qtquickcontrols2.git"],
                                default_branch="kde/5.15", force_branch=True)
@@ -721,7 +721,7 @@ class BuildQtQuickControls2(BuildQtModuleWithQMake):
 
 class BuildQtQuickControls(BuildQtModuleWithQMake):
     target = "qtquickcontrols"
-    dependencies = ["qtdeclarative"]
+    dependencies = ("qtdeclarative",)
     repository = GitRepository("https://code.qt.io/qt/qtquickcontrols.git",
                                # "https://invent.kde.org/qt/qt/qtquickcontrols.git",
                                default_branch="5.15", force_branch=True)
@@ -732,7 +732,7 @@ class BuildQtQuickControls(BuildQtModuleWithQMake):
 
 class BuildQtGraphicalEffects(BuildQtModuleWithQMake):
     target = "qtgraphicaleffects"
-    dependencies = ["qtdeclarative"]
+    dependencies = ("qtdeclarative",)
     # Depends on OpenGL to be useful, https://github.com/CTSRD-CHERI/qtgraphicaleffects allows compiling without OpenGL
     repository = GitRepository("https://code.qt.io/qt/qtgraphicaleffects.git",
                                old_urls=[b"https://github.com/CTSRD-CHERI/qtgraphicaleffects"],
@@ -792,27 +792,37 @@ class BuildICU4C(CrossCompileAutotoolsProject):
 class BuildLibXml2(CrossCompileCMakeProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/libxml2")
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
-    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + [CompilationTargets.NATIVE]
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
 
     def setup(self):
         super().setup()
         # TODO: could enable these for the host version
-        self.add_cmake_options(LIBXML2_WITH_PYTHON=False, LIBXML2_WITH_LZMA=False, LIBXML2_WITH_MODULES=False)
+        self.add_cmake_options(LIBXML2_WITH_PYTHON=False, LIBXML2_WITH_LZMA=False)
+        self.add_cmake_options(LIBXML2_WITH_MODULES=not self.force_static_linkage)
         self.add_cmake_options(BUILD_SHARED_LIBS=not self.force_static_linkage)
+
+
+class BuildLibXslt(CrossCompileCMakeProject):
+    repository = GitRepository("https://gitlab.gnome.org/GNOME/libxslt.git")
+    dependencies = ("libxml2",)
+    native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
+    supported_architectures = CompilationTargets.ALL_FREEBSD_AND_CHERIBSD_TARGETS + CompilationTargets.ALL_NATIVE
+
+    def setup(self):
+        super().setup()
+        self.add_cmake_options(BUILD_SHARED_LIBS=not self.force_static_linkage)
+        self.add_cmake_options(LIBXSLT_WITH_PYTHON=False)  # libxml2 built without python
 
 
 class BuildQtWebkit(CrossCompileCMakeProject):
     repository = GitRepository("https://github.com/CTSRD-CHERI/qtwebkit",
                                default_branch="qtwebkit-5.212-cheri", force_branch=True)
     is_large_source_repository = True
-    dependencies = ["qtbase", "icu4c", "libxml2", "sqlite"]
+    dependencies = ("qtbase", "icu4c", "libxml2", "sqlite")
     # webkit is massive if we include debug info
     default_build_type = BuildType.RELWITHDEBINFO
-
     native_install_dir = DefaultInstallDir.CHERI_SDK
     default_source_dir = default_source_dir_in_subdir(Path("qt5"))
-    needs_mxcaptable_static = True  # Currently way over the limit
-    needs_mxcaptable_dynamic = True  # Currently way over the limit
 
     @property
     def llvm_binutils_dir(self) -> Path:
@@ -859,7 +869,7 @@ class BuildQtWebkit(CrossCompileCMakeProject):
                                QT_STATIC_BUILD=True,  # we always build qt static for now
                                QT_BUNDLED_PNG=True,  # use libpng from Qt
                                # QT_BUNDLED_JPEG=True,  # use libjpeg from Qt
-                               QTWEBKIT_LINK_STATIC_ONLY=self.force_static_linkage
+                               QTWEBKIT_LINK_STATIC_ONLY=self.force_static_linkage,
                                )
         if not self.compiling_for_host():
             # we need to find the installed Qt
@@ -909,10 +919,10 @@ class BuildQtWebkit(CrossCompileCMakeProject):
     def install(self, **kwargs):
         # create a stripped version of DumpRenderTree and jsc since the one with debug info is too big
         if not self.build_jsc_only:
-            dump_render_tree = self.build_dir / "bin/DumpRenderTree"  # type: Path
+            dump_render_tree = self.build_dir / "bin/DumpRenderTree"
             self.maybe_strip_elf_file(dump_render_tree, output_path=dump_render_tree.with_suffix(".stripped"),
                                       print_verbose_only=False)
-        jsc = self.build_dir / "bin/jsc"  # type: Path
+        jsc = self.build_dir / "bin/jsc"
         self.maybe_strip_elf_file(jsc, output_path=jsc.with_suffix(".stripped"), print_verbose_only=False)
         self.info("Not installing qtwebit since it uses too much space. If you really want this run `ninja install`")
 

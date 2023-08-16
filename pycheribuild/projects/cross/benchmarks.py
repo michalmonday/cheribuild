@@ -32,16 +32,23 @@ import shutil
 import tempfile
 import typing
 from pathlib import Path
+from typing import Optional
 
 from .benchmark_mixin import BenchmarkMixin
-from .crosscompileproject import (CompilationTargets, CrossCompileAutotoolsProject, CrossCompileProject,
-                                  DefaultInstallDir, GitRepository, MakeCommandKind)
+from .crosscompileproject import (
+    CompilationTargets,
+    CrossCompileAutotoolsProject,
+    CrossCompileProject,
+    DefaultInstallDir,
+    GitRepository,
+    MakeCommandKind,
+)
 from .llvm_test_suite import BuildLLVMTestSuite, BuildLLVMTestSuiteBase
 from ..project import ReuseOtherProjectRepository
 from ...config.target_info import CPUArchitecture
 from ...processutils import get_program_version
 from ...targets import target_manager
-from ...utils import is_jenkins_build, OSInfo, replace_one
+from ...utils import OSInfo, is_jenkins_build, replace_one
 
 
 class BuildMibench(BenchmarkMixin, CrossCompileProject):
@@ -55,7 +62,7 @@ class BuildMibench(BenchmarkMixin, CrossCompileProject):
     # Keep the old bundles when cleaning
     _extra_git_clean_excludes = ["--exclude=*-bundle"]
     # The makefiles here can't support any other tagets:
-    supported_architectures = [CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.NATIVE,)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -196,7 +203,7 @@ class BuildOlden(BenchmarkMixin, CrossCompileProject):
     # and we have to build in the source directory
     build_in_source_dir = True
     # The makefiles here can't support any other tagets:
-    supported_architectures = [CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.NATIVE,)
 
     def compile(self, **kwargs):
         new_env = dict()
@@ -259,7 +266,7 @@ class BuildOlden(BenchmarkMixin, CrossCompileProject):
             self.fatal("running x86 tests is not implemented yet")
             return
         # testing, not benchmarking -> run only once: (-s small / -s large?)
-        test_command = "cd /build/bin && ./run_jenkins-bluehive.sh -d0 -r1 {tgt}".format(tgt=self.test_arch_suffix)
+        test_command = f"cd /build/bin && ./run_jenkins-bluehive.sh -d0 -r1 {self.test_arch_suffix}"
         self.target_info.run_cheribsd_test_script("run_simple_tests.py", "--test-command", test_command,
                                                   "--test-timeout", str(120 * 60),
                                                   mount_builddir=True)
@@ -284,18 +291,17 @@ class BuildOlden(BenchmarkMixin, CrossCompileProject):
 class BuildSpec2006New(BuildLLVMTestSuiteBase):
     repository = ReuseOtherProjectRepository(source_project=BuildLLVMTestSuite, do_update=True)
     target = "spec2006"
-    spec_iso_path: "typing.ClassVar[typing.Optional[Path]]"
+    spec_iso_path: "typing.ClassVar[Optional[Path]]"
     _config_file_aliases = ("spec2006-new",)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
-        cls.spec_iso_path = cls.add_path_option("iso-path", altname="spec-sources", default=None,
-                                                help="Path to the SPEC2006 ISO image or extracted sources")
+        cls.spec_iso_path = cls.add_optional_path_option("iso-path", altname="spec-sources",
+                                                         help="Path to the SPEC2006 ISO image or extracted sources")
         cls.fast_benchmarks_only = cls.add_bool_option("fast-benchmarks-only", default=False)
         cls.workload = cls.add_config_option("workload", choices=("test", "train", "ref"), default="test")
-        cls.benchmark_override = cls.add_config_option("benchmarks", default=[], kind=list,
-                                                       help="override the list of benchmarks to run")
+        cls.benchmark_override = cls.add_list_option("benchmarks", help="override the list of benchmarks to run")
 
     @property
     def extracted_spec_sources(self) -> Path:
@@ -323,7 +329,7 @@ class BuildSpec2006New(BuildLLVMTestSuiteBase):
             "473.astar",  # 3 runs = 0:31:41  -> ~10:30 mins per run
             "483.xalancbmk",  # 3 runs = 0:00:55 -> ~20 secs per run"
             ]
-        self.complete_benchmark_list = self.working_benchmark_list + ["400.perlbench", "403.gcc", "429.mcf"]
+        self.complete_benchmark_list = [*self.working_benchmark_list, "400.perlbench", "403.gcc", "429.mcf"]
         self.fast_list = ["471.omnetpp", "483.xalancbmk", "456.hmmer", "462.libquantum"]
         if self.benchmark_override:
             self.benchmark_list = self.benchmark_override
@@ -413,7 +419,7 @@ class BuildLMBench(BenchmarkMixin, CrossCompileProject):
     # Keep the old bundles when cleaning
     _extra_git_clean_excludes = ["--exclude=*-bundle"]
     # The makefiles here can't support any other tagets:
-    supported_architectures = [CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.NATIVE,)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -477,8 +483,7 @@ class BuildLMBench(BenchmarkMixin, CrossCompileProject):
             self.fatal("running x86 tests is not implemented yet")
             return
         # testing, not benchmarking -> run only once
-        test_command = "cd '/build/{dirname}' && ./run_jenkins-bluehive.sh -d0 -r1 -s".format(
-            dirname=self.bundle_dir.name)
+        test_command = f"cd '/build/{self.bundle_dir.name}' && ./run_jenkins-bluehive.sh -d0 -r1 -s"
         self.target_info.run_cheribsd_test_script("run_simple_tests.py", "--test-command", test_command,
                                                   "--test-timeout", str(120 * 60), mount_builddir=True)
 
@@ -494,7 +499,7 @@ class BuildUnixBench(BenchmarkMixin, CrossCompileProject):
     # Keep the old bundles when cleaning
     _extra_git_clean_excludes = ["--exclude=*-bundle"]
     # The makefiles here can't support any other tagets:
-    supported_architectures = [CompilationTargets.NATIVE]
+    supported_architectures = (CompilationTargets.NATIVE,)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -534,7 +539,7 @@ class BuildUnixBench(BenchmarkMixin, CrossCompileProject):
                     self.make_args.set(ARCHNAME="mips64")
 
             # link with libstatcounters
-            cflags = self.default_compiler_flags + ["-lstatcounters"]
+            cflags = [*self.default_compiler_flags, "-lstatcounters"]
             if self.fixed_iterations:
                 cflags += ["-DUNIXBENCH_FIXED_ITER"]
             self.make_args.set(ADDITIONAL_CFLAGS=self.commandline_to_str(cflags))
@@ -564,9 +569,9 @@ class NetPerfBench(BenchmarkMixin, CrossCompileAutotoolsProject):
     # Keep the old bundles when cleaning
     _extra_git_clean_excludes = ["--exclude=*-bundle"]
     # The makefiles here can't support any other tagets:
-    supported_architectures = [CompilationTargets.CHERIBSD_RISCV_NO_CHERI,
+    supported_architectures = (CompilationTargets.CHERIBSD_RISCV_NO_CHERI,
                                CompilationTargets.CHERIBSD_RISCV_HYBRID,
-                               CompilationTargets.CHERIBSD_RISCV_PURECAP]
+                               CompilationTargets.CHERIBSD_RISCV_PURECAP)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -578,7 +583,7 @@ class NetPerfBench(BenchmarkMixin, CrossCompileAutotoolsProject):
     def configure(self, **kwargs):
         self.configure_args.append("--enable-unixdomain")
         if self.hw_counters:
-            self.configure_args.append("--enable-pmc={}".format(self.hw_counters))
+            self.configure_args.append(f"--enable-pmc={self.hw_counters}")
         self.add_configure_vars(ac_cv_func_setpgrp_void="yes")
         super().configure(**kwargs)
 

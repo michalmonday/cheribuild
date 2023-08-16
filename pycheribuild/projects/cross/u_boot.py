@@ -29,10 +29,19 @@
 #
 
 from pathlib import Path
+from typing import Optional
 
 from ..build_qemu import BuildQEMU
-from ..project import (BuildType, CheriConfig, ComputedDefaultValue, CrossCompileTarget, DefaultInstallDir,
-                       GitRepository, MakeCommandKind, Project)
+from ..project import (
+    BuildType,
+    CheriConfig,
+    ComputedDefaultValue,
+    CrossCompileTarget,
+    DefaultInstallDir,
+    GitRepository,
+    MakeCommandKind,
+    Project,
+)
 from ...config.compilation_targets import CompilationTargets
 
 
@@ -44,15 +53,15 @@ class BuildUBoot(Project):
     target = "u-boot"
     repository = GitRepository("https://github.com/CTSRD-CHERI/u-boot",
                                default_branch="cheri")
-    dependencies = ["compiler-rt-builtins"]
+    dependencies = ("compiler-rt-builtins",)
     needs_sysroot = False  # We don't need a complete sysroot
     default_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR
     default_build_type = BuildType.RELWITHDEBINFO
-    supported_architectures = [
-        CompilationTargets.BAREMETAL_NEWLIB_RISCV64_HYBRID,
-        CompilationTargets.BAREMETAL_NEWLIB_RISCV64,
-        # Won't compile yet: CompilationTargets.BAREMETAL_NEWLIB_RISCV64_PURECAP
-        ]
+    supported_architectures = (
+        CompilationTargets.FREESTANDING_RISCV64_HYBRID,
+        CompilationTargets.FREESTANDING_RISCV64,
+        # Won't compile yet: CompilationTargets.FREESTANDING_RISCV64_PURECAP
+    )
     make_kind = MakeCommandKind.GnuMake
     _always_add_suffixed_targets = True
     _default_install_dir_fn: ComputedDefaultValue[Path] = \
@@ -115,7 +124,8 @@ class BuildUBoot(Project):
         return self.install_dir / "u-boot"
 
     @classmethod
-    def get_firmware_path(cls, caller, config: CheriConfig = None, cross_target: CrossCompileTarget = None):
+    def get_firmware_path(cls, caller, config: "Optional[CheriConfig]" = None,
+                          cross_target: "Optional[CrossCompileTarget]" = None):
         return cls.get_instance(caller, config=config, cross_target=cross_target).firmware_path
 
     def configure(self, **kwargs):

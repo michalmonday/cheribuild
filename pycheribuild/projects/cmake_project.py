@@ -31,16 +31,15 @@ import os
 import shlex
 import shutil
 import subprocess
-import typing
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .project import MakeCommandKind, Project, _CMakeAndMesonSharedLogic
 from .simple_project import _default_stdout_filter
-from .project import _CMakeAndMesonSharedLogic, MakeCommandKind, Project
 from ..config.chericonfig import BuildType
 from ..processutils import commandline_to_str, run_command
 from ..targets import target_manager
-from ..utils import include_local_file, InstallInstructions, OSInfo
+from ..utils import InstallInstructions, OSInfo, include_local_file
 
 __all__ = ["CMakeProject"]  # no-combine
 
@@ -94,8 +93,8 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
     @classmethod
     def setup_config_options(cls, **kwargs) -> None:
         super().setup_config_options(**kwargs)
-        cls.cmake_options = cls.add_config_option("cmake-options", default=[], kind=list, metavar="OPTIONS",
-                                                  help="Additional command line options to pass to CMake")
+        cls.cmake_options = cls.add_list_option("cmake-options", metavar="OPTIONS",
+                                                help="Additional command line options to pass to CMake")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -110,10 +109,8 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         self.build_type_var_suffix = ""
         if "Ninja" in generator:
             self.make_args.subkind = MakeCommandKind.Ninja
-            self.check_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
         elif "Makefiles" in generator:
             self.make_args.subkind = MakeCommandKind.DefaultMake
-            self.check_required_system_tool("make")
         else:
             self.make_args.subkind = MakeCommandKind.CustomMakeTool  # VS/XCode, etc.
         self._toolchain_file: "Optional[Path]" = None
@@ -155,7 +152,7 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
             assert self.destdir, "custom install prefix requires DESTDIR being set!"
             self.add_cmake_options(CMAKE_INSTALL_PREFIX=self.install_prefix)
             if self.target_info.is_baremetal() and str(self.install_prefix) == "/":
-                self.add_cmake_options(CMAKE_INSTALL_INCLUDEDIR="/include"),  # Don't add the extra /usr in the sysroot
+                self.add_cmake_options(CMAKE_INSTALL_INCLUDEDIR="/include")  # Don't add the extra /usr in the sysroot
         else:
             self.add_cmake_options(CMAKE_INSTALL_PREFIX=self.install_dir)
         if not self.compiling_for_host():
@@ -177,7 +174,11 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
             self.add_cmake_options(
                 CMAKE_SHARED_LIBRARY_SUFFIX=".a",
                 CMAKE_FIND_LIBRARY_SUFFIXES=".a",
-                CMAKE_EXTRA_SHARED_LIBRARY_SUFFIXES=".a")
+                CMAKE_EXTRA_SHARED_LIBRARY_SUFFIXES=".a",
+                CMAKE_SKIP_RPATH=True)
+            if self.compiling_for_host():
+                self.add_cmake_options(
+                    CMAKE_PROJECT_INCLUDE=Path(__file__).absolute().parent.parent / "files/ForceStaticLibraries.cmake")
         else:
             # Use $ORIGIN in the build RPATH (this should make it easier to run tests without having the absolute
             # build directory mounted).
@@ -186,11 +187,11 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
             self.add_cmake_options(CMAKE_INSTALL_RPATH_USE_LINK_PATH=True)
             # CMake does not add the install directory even if it's a non-default location, so add it manually.
             self.add_cmake_options(CMAKE_INSTALL_RPATH="$ORIGIN/../lib")
-        if not self.compiling_for_host() and self.make_args.subkind == MakeCommandKind.Ninja:
-            # Ninja can't change the RPATH when installing: https://gitlab.kitware.com/cmake/cmake/issues/13934
-            # Fixed in https://gitlab.kitware.com/cmake/cmake/-/merge_requests/6240 (3.21.20210625)
-            self.add_cmake_options(
-                CMAKE_BUILD_WITH_INSTALL_RPATH=self._get_configure_tool_version() < (3, 21, 20210625))
+            if not self.compiling_for_host() and self.make_args.subkind == MakeCommandKind.Ninja:
+                # Ninja can't change the RPATH when installing: https://gitlab.kitware.com/cmake/cmake/issues/13934
+                # Fixed in https://gitlab.kitware.com/cmake/cmake/-/merge_requests/6240 (3.21.20210625)
+                self.add_cmake_options(
+                    CMAKE_BUILD_WITH_INSTALL_RPATH=self._get_configure_tool_version() < (3, 21, 20210625))
         # NB: Don't add the user provided options here, we append add them in setup_late() so that they are put last.
 
     def setup_late(self):
@@ -223,6 +224,13 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
                                       f"CMAKE_CXX_FLAGS{self.build_type_var_suffix}": flags})
         # Add the options from the config file now so that they are added after child class setup() calls.
         self.configure_args.extend(self.cmake_options)
+
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
+        if self.make_args.subkind == MakeCommandKind.Ninja:
+            self.check_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
+        elif self.make_args.subkind == MakeCommandKind.DefaultMake:
+            self.check_required_system_tool("make")
 
     def add_cmake_options(self, *, _include_empty_vars=False, _replace=True, **kwargs) -> None:
         return self._add_configure_options(_config_file_options=self.cmake_options, _replace=_replace,
@@ -257,8 +265,12 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         # This means we may not need the toolchain file at all
         # https://cmake.org/cmake/help/latest/variable/CMAKE_CROSSCOMPILING.html
         # TODO: avoid the toolchain file and set all flags on the command line
+        force_static_script = file.parent / "ForceStaticLibraries.cmake"
+        if self.force_static_linkage:
+            self.write_file(force_static_script, include_local_file("files/ForceStaticLibraries.cmake"),
+                            overwrite=True)
         self._prepare_toolchain_file_common(file, TOOLCHAIN_FORCE_STATIC=self.force_static_linkage,
-                                            TOOLCHAIN_FILE_PATH=file.absolute())
+                                            FORCE_STATIC_LIBRARIES_CMAKE_SCRIPT=force_static_script)
 
     def configure(self, **kwargs) -> None:
         # make sure we get a completely fresh cache when --reconfigure is passed:
@@ -367,5 +379,5 @@ class MakefileProject(Project):
         else:
             self.make_args.set_env(**{var: value})
 
-    def _do_generate_cmakelists(self) -> "typing.NoReturn":
+    def _do_generate_cmakelists(self) -> None:
         raise ValueError(f"Should not be called for CMake project {self.target}")

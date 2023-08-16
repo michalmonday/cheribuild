@@ -31,9 +31,15 @@
 # SUCH DAMAGE.
 #
 from .cmake_project import CMakeProject
-from .project import (AutotoolsProject, CheriConfig, DefaultInstallDir, GitRepository,
-                      MakeCommandKind, ReuseOtherProjectDefaultTargetRepository)
 from .cross.crosscompileproject import CrossCompileCMakeProject
+from .project import (
+    AutotoolsProject,
+    CheriConfig,
+    DefaultInstallDir,
+    GitRepository,
+    MakeCommandKind,
+    ReuseOtherProjectDefaultTargetRepository,
+)
 from ..config.chericonfig import BuildType, Linkage
 from ..config.compilation_targets import CompilationTargets, CrossCompileTarget
 from ..targets import target_manager
@@ -60,11 +66,10 @@ class BuildCMake(AutotoolsProject):
     add_host_target_build_config_options = False
 
     @classmethod
-    def dependencies(cls, _: CheriConfig) -> "list[str]":
-        xtarget = cls.get_crosscompile_target()
-        if xtarget is not None and xtarget.is_cheri_purecap():
-            return ["libuv"]
-        return []
+    def dependencies(cls, _: CheriConfig) -> "tuple[str, ...]":
+        if cls.get_crosscompile_target().is_cheri_purecap():
+            return ("libuv",)
+        return tuple()
 
     def setup(self) -> None:
         super().setup()
@@ -90,7 +95,7 @@ class BuildCrossCompiledCMake(CMakeProject):
 
     repository = ReuseOtherProjectDefaultTargetRepository(BuildCMake, do_update=True)
     target = "cmake-crosscompiled"  # Can't use cmake here due to command line option conflict
-    dependencies = ["libuv"]
+    dependencies = ("libuv",)
     default_directory_basename = "cmake"
     default_build_type = BuildType.RELEASE  # Don't include debug info by default
     cross_install_dir = DefaultInstallDir.ROOTFS_OPTBASE
