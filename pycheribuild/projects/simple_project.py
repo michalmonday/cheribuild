@@ -55,7 +55,7 @@ from ..utils import (classproperty, fatal_error, InstallInstructions, is_jenkins
 __all__ = ["_cached_get_homebrew_prefix", "_clear_line_sequence", "_default_stdout_filter",  # no-combine
            "flush_stdio", "SimpleProject", "TargetAlias", "TargetAliasWithDependencies"]  # no-combine
 
-Type_T = typing.TypeVar("Type_T")
+T = typing.TypeVar("T")
 
 
 def flush_stdio(stream) -> None:
@@ -80,7 +80,7 @@ class ProjectSubclassDefinitionHook(ABCMeta):
     def __init__(cls, name: str, bases, clsdict) -> None:
         super().__init__(name, bases, clsdict)
         if typing.TYPE_CHECKING:
-            assert issubclass(cls, SimpleProject)  # pytype: disable=name-error
+            assert issubclass(cls, SimpleProject)
         if clsdict.get("do_not_add_to_targets") is not None:
             if clsdict.get("do_not_add_to_targets") is True:
                 return  # if do_not_add_to_targets is defined within the class we skip it
@@ -151,7 +151,7 @@ class ProjectSubclassDefinitionHook(ABCMeta):
                 new_dict["synthetic_base"] = cls  # We are already adding it here
                 # noinspection PyTypeChecker
                 new_cls = type(cls.__name__ + "_" + arch.name, (cls,) + cls.__bases__, new_dict)
-                assert issubclass(new_cls, SimpleProject)  # pytype: disable=name-error
+                assert issubclass(new_cls, SimpleProject)
                 target_manager.add_target(MultiArchTarget(new_name, new_cls, arch, base_target))
                 # Handle old names for FreeBSD/CheriBSD targets in the config file:
                 if arch.target_info_cls.is_freebsd() and not arch.target_info_cls.is_native():
@@ -250,6 +250,11 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
     _should_not_be_instantiated: bool = True
     # To prevent non-suffixed targets in case the only target is not NATIVE
     _always_add_suffixed_targets: bool = False  # add a suffixed target only if more than one variant is supported
+
+    # List of system tools/headers/pkg-config files that have been checked so far (to avoid duplicate work)
+    __checked_system_tools = {}  # type: typing.Dict[str, InstallInstructions]
+    __checked_system_headers = {}  # type: typing.Dict[str, InstallInstructions]
+    __checked_pkg_config = {}  # type: typing.Dict[str, InstallInstructions]
 
     custom_target_name: "Optional[typing.Callable[[str, CrossCompileTarget], str]]" = None
 
@@ -431,8 +436,8 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
                                                                  include_sdk_dependencies=True)
 
     @classmethod
-    def get_instance(cls: typing.Type[Type_T], caller: "typing.Optional[AbstractProject]",
-                     config: CheriConfig = None, cross_target: typing.Optional[CrossCompileTarget] = None) -> Type_T:
+    def get_instance(cls: typing.Type[T], caller: "typing.Optional[AbstractProject]",
+                     config: CheriConfig = None, cross_target: typing.Optional[CrossCompileTarget] = None) -> T:
         # TODO: assert that target manager has been initialized
         if caller is not None:
             if config is None:
@@ -446,29 +451,37 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         return cls.get_instance_for_cross_target(cross_target, config, caller=caller)
 
     @classmethod
-    def get_instance_for_cross_target(cls: typing.Type[Type_T], cross_target: CrossCompileTarget,
-                                      config: CheriConfig, caller: AbstractProject = None) -> Type_T:
+    def _get_instance_no_setup(cls: typing.Type[T], caller: AbstractProject,
+                               cross_target: typing.Optional[CrossCompileTarget] = None) -> T:
+        if cross_target is None:
+            cross_target = caller.crosscompile_target
+        target = target_manager.get_target(cls.target, cross_target, caller.config, caller=caller)
+        # noinspection PyProtectedMember
+        result = target._get_or_create_project_no_setup(cross_target, caller.config, caller=caller)
+        assert isinstance(result, SimpleProject)
+        return result
+
+    @classmethod
+    def get_instance_for_cross_target(cls: typing.Type[T], cross_target: CrossCompileTarget,
+                                      config: CheriConfig, caller: AbstractProject = None) -> T:
         # Also need to handle calling self.get_instance_for_cross_target() on a target-specific instance
-        # In that case cls.target returns e.g. foo-mips, etc and target_manager will always return the MIPS version
+        # In that case cls.target returns e.g. foo-mips, etc. and target_manager will always return the MIPS version
+        if caller is not None:
+            assert caller._init_called, "Cannot call this inside __init__()"
         root_class = getattr(cls, "synthetic_base", cls)
         target = target_manager.get_target(root_class.target, cross_target, config, caller=caller)
-        result = target.get_or_create_project(cross_target, config)
+        result = target.get_or_create_project(cross_target, config, caller=caller)
         assert isinstance(result, SimpleProject)
         found_target = result.get_crosscompile_target()
         # XXX: FIXME: add cross target to every call
         assert cross_target is not None
-        if cross_target is not None:
-            assert found_target is cross_target, "Didn't find right instance of " + str(cls) + ": " + str(
-                found_target) + " vs. " + str(cross_target) + ", caller was " + repr(caller)
+        assert found_target is cross_target, "Didn't find right instance of " + str(cls) + ": " + str(
+            found_target) + " vs. " + str(cross_target) + ", caller was " + repr(caller)
         return result
 
     @classproperty
     def default_architecture(self) -> "typing.Optional[CrossCompileTarget]":
         return self._default_architecture
-
-    @property
-    def crosscompile_target(self) -> CrossCompileTarget:
-        return self.get_crosscompile_target()
 
     def get_host_triple(self) -> str:
         compiler = self.get_compiler_info(self.host_CC)
@@ -576,7 +589,7 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
                                                                include_os=self.include_os_in_target_suffix) + ")"
 
     @classmethod
-    def get_class_for_target(cls: "typing.Type[Type_T]", arch: CrossCompileTarget) -> "typing.Type[Type_T]":
+    def get_class_for_target(cls: "typing.Type[T]", arch: CrossCompileTarget) -> "typing.Type[T]":
         target = target_manager.get_target_raw(cls.target)
         if isinstance(target, MultiArchTarget):
             # check for exact match
@@ -629,11 +642,11 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
 
     @classmethod
     def add_config_option(cls, name: str, *, show_help=False, altname: str = None,
-                          kind: "Union[typing.Type[Type_T], Callable[[str], Type_T]]" = str,
-                          default: "Optional[Union[ComputedDefaultValue[Type_T], Type_T, Callable[[], Type_T]]]" = None,
-                          only_add_for_targets: "typing.List[CrossCompileTarget]" = None,
+                          kind: "Union[typing.Type[T], Callable[[str], T]]" = str,
+                          default: "Union[ComputedDefaultValue[T], Callable[[CheriConfig, SimpleProject], T], T, None]"
+                          = None, only_add_for_targets: "list[CrossCompileTarget]" = None,
                           extra_fallback_config_names: "typing.List[str]" = None, _allow_unknown_targets=False,
-                          use_default_fallback_config_names=True, **kwargs) -> Optional[Type_T]:
+                          use_default_fallback_config_names=True, **kwargs) -> Optional[T]:
         fullname = cls.target + "/" + name
         # We abuse shortname to implement altname
         if altname is not None:
@@ -709,15 +722,15 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
     @classmethod
     def add_bool_option(cls, name: str, *, altname=None, only_add_for_targets: list = None,
                         default: "typing.Union[bool, ComputedDefaultValue[bool]]" = False, **kwargs) -> bool:
-        return cls.add_config_option(name, default=default, kind=bool, altname=altname,
-                                     only_add_for_targets=only_add_for_targets, **kwargs)
+        return typing.cast(bool, cls.add_config_option(name, default=default, kind=bool, altname=altname,
+                                                       only_add_for_targets=only_add_for_targets, **kwargs))
 
     @classmethod
     def add_path_option(cls, name: str, *, altname=None, only_add_for_targets: list = None, **kwargs) -> Optional[Path]:
         return cls.add_config_option(name, kind=Path, altname=altname, only_add_for_targets=only_add_for_targets,
                                      **kwargs)
 
-    __config_options_set = dict()  # typing.Dict[Type, bool]
+    __config_options_set: "dict[typing.Type[SimpleProject], bool]" = dict()
 
     @classmethod
     def setup_config_options(cls, **kwargs) -> None:
@@ -729,17 +742,15 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
                                                                           "the value of the global --clean option"),
                                              help="Override --clean/--no-clean for this target only")
 
-    def __init__(self, config: CheriConfig) -> None:
+    def __init__(self, config: CheriConfig, *, crosscompile_target: CrossCompileTarget) -> None:
         assert self._xtarget is not None, "Placeholder class should not be instantiated: " + repr(self)
         self.target_info = self._xtarget.create_target_info(self)
         super().__init__(config)
-        self.config = config
+        self.crosscompile_target = crosscompile_target
+        assert self._xtarget == crosscompile_target, "Failed to update all callers?"
         assert not self._should_not_be_instantiated, "Should not have instantiated " + self.__class__.__name__
         assert self.__class__ in self.__config_options_set, "Forgot to call super().setup_config_options()? " + str(
             self.__class__)
-        self.__required_system_tools = {}  # type: typing.Dict[str, InstallInstructions]
-        self.__required_system_headers = {}  # type: typing.Dict[str, InstallInstructions]
-        self.__required_pkg_config = {}  # type: typing.Dict[str, InstallInstructions]
         self._system_deps_checked = False
         self._setup_called = False
         self._setup_late_called = False
@@ -761,9 +772,6 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         assert not self._setup_late_called, "Should only be called once"
         self._setup_late_called = True
 
-    def has_required_system_tool(self, executable: str) -> bool:
-        return executable in self.__required_system_tools
-
     def _validate_cheribuild_target_for_system_deps(self, cheribuild_target: "typing.Optional[str]"):
         if not cheribuild_target:
             return
@@ -774,45 +782,71 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
             self.fatal("add_required_*() should use a native cheribuild target and not ", cheribuild_target,
                        "- found while processing", self.target, fatal_when_pretending=True)
 
-    def add_required_system_tool(self, executable: str, install_instructions: "Optional[str]" = None,
-                                 default: "Optional[str]" = None, freebsd: "Optional[str]" = None,
-                                 apt: "Optional[str]" = None, zypper: "Optional[str]" = None,
-                                 homebrew: "Optional[str]" = None, cheribuild_target: "Optional[str]" = None,
-                                 alternative_instructions: "Optional[str]" = None):
-        if install_instructions is not None:
-            instructions = InstallInstructions(install_instructions, cheribuild_target=cheribuild_target,
-                                               alternative=alternative_instructions)
-        else:
-            instructions = OSInfo.install_instructions(executable, False, default=default, freebsd=freebsd,
-                                                       zypper=zypper, apt=apt, homebrew=homebrew,
-                                                       cheribuild_target=cheribuild_target)
-        if executable in self.__required_system_tools:
-            assert instructions.fixit_hint() == self.__required_system_tools[executable].fixit_hint()
-        self.__required_system_tools[executable] = instructions
+    def check_required_system_tool(self, executable: str, instructions: "Optional[InstallInstructions]" = None,
+                                   default: "Optional[str]" = None, freebsd: "Optional[str]" = None,
+                                   apt: "Optional[str]" = None, zypper: "Optional[str]" = None,
+                                   homebrew: "Optional[str]" = None, cheribuild_target: "Optional[str]" = None,
+                                   alternative_instructions: "Optional[str]" = None):
+        if instructions is None:
+            instructions = OSInfo.install_instructions(
+                executable, is_lib=False, default=default, freebsd=freebsd, zypper=zypper, apt=apt, homebrew=homebrew,
+                cheribuild_target=cheribuild_target, alternative=alternative_instructions)
+        if executable in self.__checked_system_tools:
+            # If we already checked for this tool, the install instructions should match
+            assert instructions.fixit_hint() == self.__checked_system_tools[executable].fixit_hint(), executable
+            return  # already checked
+        assert instructions.cheribuild_target == cheribuild_target
+        assert instructions.alternative == alternative_instructions
+        self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
+        if not shutil.which(str(executable)):
+            self.dependency_error("Required program", executable, "is missing!", install_instructions=instructions,
+                                  cheribuild_target=instructions.cheribuild_target,
+                                  cheribuild_xtarget=BasicCompilationTargets.NATIVE)
+        self.__checked_system_tools[executable] = instructions
 
-    def add_required_pkg_config(self, package: str, install_instructions: str = None, default: str = None,
-                                freebsd: str = None, apt: str = None, zypper: str = None, homebrew: str = None,
-                                cheribuild_target: str = None, alternative_instructions: str = None) -> None:
-        if not self.has_required_system_tool("pkg-config"):
-            self.add_required_system_tool("pkg-config", freebsd="pkgconf", homebrew="pkg-config", apt="pkg-config")
-        if install_instructions is not None:
-            instructions = InstallInstructions(install_instructions, cheribuild_target=cheribuild_target,
-                                               alternative=alternative_instructions)
-        else:
-            instructions = OSInfo.install_instructions(package, True, default=default, freebsd=freebsd, zypper=zypper,
-                                                       apt=apt, homebrew=homebrew, cheribuild_target=cheribuild_target)
-        self.__required_pkg_config[package] = instructions
+    def check_required_pkg_config(self, package: str, instructions: InstallInstructions = None,
+                                  default: str = None, freebsd: str = None, apt: str = None, zypper: str = None,
+                                  homebrew: str = None, cheribuild_target: str = None,
+                                  alternative_instructions: str = None) -> None:
+        if "pkg-config" not in self.__checked_system_tools:
+            self.check_required_system_tool("pkg-config", freebsd="pkgconf", homebrew="pkg-config", apt="pkg-config")
+            return
+        if instructions is None:
+            instructions = OSInfo.install_instructions(
+                package, is_lib=False, default=default, freebsd=freebsd, zypper=zypper, apt=apt, homebrew=homebrew,
+                cheribuild_target=cheribuild_target, alternative=alternative_instructions)
+        if package in self.__checked_pkg_config:
+            # If we already checked for this pkg-config .pc file, the install instructions should match
+            assert instructions.fixit_hint() == self.__checked_pkg_config[package].fixit_hint(), package
+            return  # already checked
+        self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
+        try:
+            self.run_cmd(["pkg-config", "--exists", package])
+        except subprocess.CalledProcessError as e:
+            self.dependency_error("Required library", package, "is missing:", e, install_instructions=instructions,
+                                  cheribuild_target=instructions.cheribuild_target,
+                                  cheribuild_xtarget=BasicCompilationTargets.NATIVE)
+        self.__checked_pkg_config[package] = instructions
 
-    def add_required_system_header(self, header: str, install_instructions: str = None, default: str = None,
-                                   freebsd: str = None, apt: str = None, zypper: str = None, homebrew: str = None,
-                                   cheribuild_target: str = None, alternative_instructions: str = None) -> None:
-        if install_instructions is not None:
-            instructions = InstallInstructions(install_instructions, cheribuild_target=cheribuild_target,
-                                               alternative=alternative_instructions)
-        else:
-            instructions = OSInfo.install_instructions(header, True, default=default, freebsd=freebsd, zypper=zypper,
-                                                       apt=apt, homebrew=homebrew, cheribuild_target=cheribuild_target)
-        self.__required_system_headers[header] = instructions
+    def check_required_system_header(self, header: str, instructions: InstallInstructions = None,
+                                     default: str = None, freebsd: str = None, apt: str = None, zypper: str = None,
+                                     homebrew: str = None, cheribuild_target: str = None,
+                                     alternative_instructions: str = None) -> None:
+        if instructions is None:
+            instructions = OSInfo.install_instructions(
+                header, is_lib=False, default=default, freebsd=freebsd, zypper=zypper, apt=apt, homebrew=homebrew,
+                cheribuild_target=cheribuild_target, alternative=alternative_instructions)
+        if header in self.__checked_system_headers:
+            # If we already checked for this header file, the install instructions should match
+            assert instructions.fixit_hint() == self.__checked_system_headers[header].fixit_hint(), header
+            return  # already checked
+        self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
+        include_dirs = self.get_compiler_info(self.CC).get_include_dirs(self.essential_compiler_and_linker_flags)
+        if not any(Path(d, header).exists() for d in include_dirs):
+            self.dependency_error("Required C header", header, "is missing!", install_instructions=instructions,
+                                  cheribuild_target=instructions.cheribuild_target,
+                                  cheribuild_xtarget=BasicCompilationTargets.NATIVE)
+        self.__checked_system_headers[header] = instructions
 
     def query_yes_no(self, message: str = "", *, default_result=False, force_result=True,
                      yes_no_str: str = None) -> bool:
@@ -1037,12 +1071,18 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
             install_instructions = install_instructions.fixit_hint()
         if cheribuild_target:
             self.warning("Dependency for", self.target, problem + ":", *args, fixit_hint=install_instructions)
+            if not self._setup_late_called:
+                # TODO: make this a fatal error
+                self.warning("TODO: Should not call dependency_error() with a cheribuild target fixit before "
+                             "setup() has completed. Move the call to process() instead.")
+                self.fatal("Dependency for", self.target, problem + ":", *args, fixit_hint=install_instructions)
+                return
             if self.query_yes_no("Would you like to " + cheribuild_action + " the dependency (" + cheribuild_target +
                                  ") using cheribuild?", force_result=False if is_jenkins_build() else True):
                 xtarget = cheribuild_xtarget if cheribuild_xtarget is not None else self.crosscompile_target
                 dep_target = target_manager.get_target(cheribuild_target, xtarget, config=self.config, caller=self)
                 dep_target.check_system_deps(self.config)
-                assert dep_target.get_or_create_project(None, self.config).crosscompile_target == xtarget
+                assert dep_target.get_or_create_project(None, self.config, caller=self).crosscompile_target == xtarget
                 dep_target.execute(self.config)
                 return  # should be installed now
         if fatal:
@@ -1068,31 +1108,6 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         Checks that all the system dependencies (required tool, etc) are available
         :return: Throws an error if dependencies are missing
         """
-        for (tool, instructions) in self.__required_system_tools.items():
-            assert isinstance(instructions, InstallInstructions)
-            self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
-            if not shutil.which(str(tool)):
-                self.dependency_error("Required program", tool, "is missing!", install_instructions=instructions,
-                                      cheribuild_target=instructions.cheribuild_target)
-        for (package, instructions) in self.__required_pkg_config.items():
-            assert isinstance(instructions, InstallInstructions)
-            self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
-            if not shutil.which("pkg-config"):
-                # error should already have printed above
-                break
-            check_cmd = ["pkg-config", "--exists", package]
-            print_command(check_cmd, print_verbose_only=True)
-            exit_code = subprocess.call(check_cmd)
-            if exit_code != 0:
-                self.dependency_error("Required library", package, "is missing!", install_instructions=instructions,
-                                      cheribuild_target=instructions.cheribuild_target)
-        for (header, instructions) in self.__required_system_headers.items():
-            assert isinstance(instructions, InstallInstructions)
-            self._validate_cheribuild_target_for_system_deps(instructions.cheribuild_target)
-            include_dirs = self.get_compiler_info(self.CC).get_include_dirs(self.essential_compiler_and_linker_flags)
-            if not any(Path(d, header).exists() for d in include_dirs):
-                self.dependency_error("Required C header", header, "is missing!", install_instructions=instructions,
-                                      cheribuild_target=instructions.cheribuild_target)
         self._system_deps_checked = True
 
     def get_homebrew_prefix(self, package: "typing.Optional[str]" = None) -> Path:

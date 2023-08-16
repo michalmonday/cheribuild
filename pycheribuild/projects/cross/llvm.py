@@ -38,7 +38,7 @@ from ..simple_project import SimpleProject
 from ...config.chericonfig import CheriConfig
 from ...config.compilation_targets import (CheriBSDMorelloTargetInfo, CheriBSDTargetInfo, CompilationTargets,
                                            FreeBSDTargetInfo)
-from ...config.target_info import CompilerType, CrossCompileTarget
+from ...config.target_info import CompilerType, CrossCompileTarget, AbstractProject
 from ...processutils import CompilerInfo
 from ...utils import is_jenkins_build, OSInfo, ThreadJoiner, remove_duplicates, InstallInstructions
 
@@ -116,11 +116,6 @@ class BuildLLVMBase(CMakeProject):
                                  "llvm-readobj", "llvm-size", "llvm-strings", "llvm-strip", "llvm-symbolizer",
                                  "opt"]
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
-        # NB: macOS includes it in the SDK, FreeBSD includes it in base
-        self.add_required_pkg_config("zlib", apt="zlib1g-dev", zypper="zlib-devel")
-
     def setup(self):
         super().setup()
         if self.compiling_for_host():
@@ -191,6 +186,8 @@ class BuildLLVMBase(CMakeProject):
             self.add_cmake_options(LLVM_LINK_LLVM_DYLIB=True)
         if self.install_toolchain_only:
             self.add_cmake_options(LLVM_INSTALL_TOOLCHAIN_ONLY=True)
+        else:
+            self.add_cmake_options(LLVM_INSTALL_UTILS=True)
         if self.skip_static_analyzer:
             # save some build time by skipping the static analyzer
             self.add_cmake_options(CLANG_ENABLE_STATIC_ANALYZER=False,
@@ -278,6 +275,8 @@ sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
         super().check_system_dependencies()
         # make sure we have at least version 3.8
         self.check_compiler_version(3, 8)
+        # NB: macOS includes it in the SDK, FreeBSD includes it in base
+        self.check_required_pkg_config("zlib", apt="zlib1g-dev", zypper="zlib-devel")
 
     def check_compiler_version(self, major: int, minor: int, patch=0):
         info = self.get_compiler_info(self.CC)
@@ -406,31 +405,31 @@ class BuildLLVMMonoRepoBase(BuildLLVMBase):
     do_not_add_to_targets = True
     root_cmakelists_subdirectory = Path("llvm")
 
+    def setup(self):
+        super().setup()
+        self.add_cmake_options(LLVM_ENABLE_PROJECTS=";".join(self.included_projects))
+
     def configure(self, **kwargs):
         if (self.source_dir / "tools/clang/.git").exists():
             self.fatal("Attempting to build LLVM Monorepo but the checkout is from the split repos!")
         if not self.included_projects:
             self.fatal("Need at least one project in --include-projects config option")
-        self.add_cmake_options(LLVM_ENABLE_PROJECTS=";".join(self.included_projects))
         super().configure(**kwargs)
 
     def add_compiler_with_config_file(self, prefix: str, target: CrossCompileTarget):
         # Create a fake project class that has the required properties needed for essential_compiler_and_linker_flags
-        class MockProject:
-            needs_sysroot = True
-            config = self.config
-
-            def warning(*args, **kwags):
-                pass
+        class MockProject(AbstractProject):
+            def __init__(self, config, _target: CrossCompileTarget):
+                super().__init__(config)
+                self.crosscompile_target = _target
+                self.needs_sysroot = True
 
         prefix += target.build_suffix(self.config, include_os=False)
         # Instantiate the target_info using the mock project:
-        # noinspection PyTypeChecker
-        target_info = target.target_info_cls(target, MockProject())  # pytype: disable=wrong-arg-types,not-instantiable
-        assert isinstance(target_info, FreeBSDTargetInfo)
+        tgt_info = target.target_info_cls(target, MockProject(self.config, target))  # pytype: disable=not-instantiable
+        assert isinstance(tgt_info, FreeBSDTargetInfo)
         # We only want the compiler flags, don't check whether required files exist
-        flags = target_info.get_essential_compiler_and_linker_flags(perform_sanity_checks=False,
-                                                                    default_flags_only=True)
+        flags = tgt_info.get_essential_compiler_and_linker_flags(perform_sanity_checks=False, default_flags_only=True)
         config_contents = "\n".join(flags) + "\n"
         self.makedirs(self.install_dir / "utils")
         # Note: the config file is loaded from the directory containing the real binary, not the symlink.

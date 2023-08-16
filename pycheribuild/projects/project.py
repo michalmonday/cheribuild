@@ -170,23 +170,24 @@ class MakeOptions(object):
                 # Prefer homebrew-installed gmake if it is available.
                 return "gmake"
             else:
-                self.__project.add_required_system_tool("make")
+                self.__project.check_required_system_tool("make")
                 return "make"
         elif self.kind == MakeCommandKind.GnuMake:
             if OSInfo.IS_LINUX and not shutil.which("gmake"):
                 status_update("Could not find `gmake` command, assuming `make` is GNU make")
-                self.__project.add_required_system_tool("make")
+                self.__project.check_required_system_tool("make")
                 return "make"
             else:
-                self.__project.add_required_system_tool("gmake", homebrew="make")
+                self.__project.check_required_system_tool("gmake", homebrew="make")
                 return "gmake"
         elif self.kind == MakeCommandKind.BsdMake:
             return "make" if OSInfo.IS_FREEBSD else "bmake"
         elif self.kind == MakeCommandKind.Ninja:
-            self.__project.add_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
+            self.__project.check_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
             return "ninja"
         elif self.kind == MakeCommandKind.CMake:
-            assert self.__project.has_required_system_tool("cmake")
+            self.__project.check_required_system_tool("cmake", default="cmake", homebrew="cmake", zypper="cmake",
+                                                      apt="cmake", freebsd="cmake")
             assert self.subkind is not None
             return "cmake"
         else:
@@ -195,16 +196,14 @@ class MakeOptions(object):
             self.__project.fatal("Cannot infer path from CustomMakeTool. Set self.make_args.set_command(\"tool\")")
             raise RuntimeError()
 
-    def set_command(self, value, can_pass_j_flag=True, early_args: "list[str]" = None, *,
-                    install_instructions=None):
+    def set_command(self, value, can_pass_j_flag=True, early_args: "list[str]" = None):
         self.__command = str(value)
         if early_args is None:
             early_args = []
         self.__command_args = early_args
         assert isinstance(self.__command_args, list)
-        # noinspection PyProtectedMember
         if not Path(value).is_absolute():
-            self.__project.add_required_system_tool(value, install_instructions=install_instructions)
+            self.__project.check_required_system_tool(value)
         self.__can_pass_j_flag = can_pass_j_flag
 
     def all_commandline_args(self, config) -> "list[str]":
@@ -444,6 +443,7 @@ class Project(SimpleProject):
     has_optional_tests: bool = False
     default_build_tests: bool = True  # whether to build tests by default
     show_optional_tests_in_help: bool = True  # whether to show the --foo/build-tests in --help
+    add_gdb_index = True  # whether to build with -Wl,--gdb-index if the linker supports it
 
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "list[str]":
@@ -477,21 +477,17 @@ class Project(SimpleProject):
     def generate_cmakelists(self):
         return self.config.generate_cmakelists
 
-    # TODO: remove these three
     @classmethod
-    def get_source_dir(cls, caller: "SimpleProject", config: CheriConfig = None,
-                       cross_target: CrossCompileTarget = None):
-        return cls.get_instance(caller, config, cross_target).source_dir
+    def get_source_dir(cls, caller: AbstractProject, cross_target: CrossCompileTarget = None):
+        return cls._get_instance_no_setup(caller, cross_target).source_dir
 
     @classmethod
-    def get_build_dir(cls, caller: "AbstractProject", config: CheriConfig = None,
-                      cross_target: CrossCompileTarget = None):
-        return cls.get_instance(caller, config, cross_target).build_dir
+    def get_build_dir(cls, caller: AbstractProject, cross_target: CrossCompileTarget = None):
+        return cls._get_instance_no_setup(caller, cross_target).build_dir
 
     @classmethod
-    def get_install_dir(cls, caller: "AbstractProject", config: CheriConfig = None,
-                        cross_target: CrossCompileTarget = None):
-        return cls.get_instance(caller, config, cross_target).real_install_root_dir
+    def get_install_dir(cls, caller: AbstractProject, cross_target: CrossCompileTarget = None):
+        return cls._get_instance_no_setup(caller, cross_target).real_install_root_dir
 
     def build_dir_for_target(self, target: CrossCompileTarget) -> Path:
         return self.config.build_root / (
@@ -556,9 +552,9 @@ class Project(SimpleProject):
             if not compiler.exists():
                 return False
             try:
-                run_command(command, run_in_pretend_mode=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, raise_in_pretend_mode=True,
-                            input="int main() { return 0; }\n", print_verbose_only=True)
+                self.run_cmd(command, run_in_pretend_mode=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, raise_in_pretend_mode=True,
+                             input="int main() { return 0; }\n", print_verbose_only=True)
                 status_update(compiler, "supports -fuse-ld=lld, linking should be much faster!")
                 Project.__can_use_lld_map[command_str] = True
             except subprocess.CalledProcessError:
@@ -584,6 +580,14 @@ class Project(SimpleProject):
         # Check that the make command exists (this will also add it to the required system tools)
         if self.make_args.command is None:
             self.fatal("Make command not set!")
+        if self.config.create_compilation_db and self.compile_db_requires_bear:
+            if self.make_args.is_gnu_make and False:
+                # use compiledb instead of bear for gnu make
+                self.check_required_system_tool("compiledb",
+                                                instructions=InstallInstructions("Run `pip install --user compiledb``"))
+            else:
+                self.check_required_system_tool("bear", homebrew="bear", cheribuild_target="bear")
+                self._compiledb_tool = "bear"
         super().check_system_dependencies()
 
     lto_by_default: bool = False  # Don't default to LTO
@@ -591,6 +595,7 @@ class Project(SimpleProject):
     lto_set_ld: bool = True
     default_build_type: BuildType = BuildType.DEFAULT
     default_auto_var_init: AutoVarInit = AutoVarInit.NONE
+    use_lto: bool
 
     @classmethod
     def setup_config_options(cls, install_directory_help="", **kwargs) -> None:
@@ -609,7 +614,7 @@ class Project(SimpleProject):
         if cls.can_build_with_asan:
             asan_default = ComputedDefaultValue(
                 function=lambda config, proj: (
-                    False if proj.get_crosscompile_target().is_cheri_purecap() else proj.default_use_asan),
+                    False if proj.crosscompile_target.is_cheri_purecap() else proj.default_use_asan),
                 as_string=str(cls.default_use_asan))
             cls.use_asan = cls.add_bool_option("use-asan", default=asan_default,
                                                help="Build with AddressSanitizer enabled")
@@ -730,7 +735,7 @@ class Project(SimpleProject):
             return []
         elif cbt == BuildType.DEBUG:
             # TODO: once clang's -Og is useful: if self.get_compiler_info(self.CC).supports_Og_flag:
-            if self.get_compiler_info(self.CC).compiler == "gcc":
+            if self.get_compiler_info(self.CC).compiler == "gcc" or self.use_asan:
                 return ["-Og"]
             return ["-O0"]
         elif cbt in (BuildType.RELEASE, BuildType.RELWITHDEBINFO):
@@ -806,7 +811,7 @@ class Project(SimpleProject):
         result += self.essential_compiler_and_linker_flags
         ccinfo = self.get_compiler_info(self.CC)
         result.extend(ccinfo.linker_override_flags(self.target_info.linker))
-        if self.should_include_debug_info and ".bfd" not in self.target_info.linker.name:
+        if self.should_include_debug_info and self.add_gdb_index and ".bfd" not in self.target_info.linker.name:
             # Add a gdb_index to massively speed up running GDB on CHERIBSD:
             result.append("-Wl,--gdb-index")
             # Also reduce the size of debug info to make copying files over faster
@@ -817,8 +822,8 @@ class Project(SimpleProject):
             result += ["-Wl,--whole-archive", "-lstatcounters", "-Wl,--no-whole-archive"]
         return result
 
-    def __init__(self, config: CheriConfig) -> None:
-        super().__init__(config)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         # set up the install/build/source directories (allowing overrides from config file)
         assert isinstance(self.repository, SourceRepository), self.target + " repository member is wrong!"
         if hasattr(self, "_repository_url") and isinstance(self.repository, GitRepository):
@@ -826,18 +831,18 @@ class Project(SimpleProject):
             self.repository.url = self._repository_url
 
         if isinstance(self.default_directory_basename, ComputedDefaultValue):
-            self.default_directory_basename = self.default_directory_basename(config, self)
+            self.default_directory_basename = self.default_directory_basename(self.config, self)
         if isinstance(self.repository, ReuseOtherProjectRepository):
             initial_source_dir = inspect.getattr_static(self, "_initial_source_dir")
             assert isinstance(initial_source_dir, ConfigOptionBase)
             # noinspection PyProtectedMember
-            assert initial_source_dir._get_default_value(config, self) is None, \
+            assert initial_source_dir._get_default_value(self.config, self) is None, \
                 "initial source dir != None for ReuseOtherProjectRepository"
         if self.source_dir is None:
             self.source_dir = self.repository.get_real_source_dir(self, self._initial_source_dir)
         else:
             if isinstance(self.source_dir, ComputedDefaultValue):
-                self.source_dir = self.source_dir(config, self)
+                self.source_dir = self.source_dir(self.config, self)
             self._initial_source_dir = self.source_dir
 
         if self.build_in_source_dir:
@@ -857,10 +862,8 @@ class Project(SimpleProject):
             if self.make_args.is_gnu_make and False:
                 # use compiledb instead of bear for gnu make
                 # https://blog.jetbrains.com/clion/2018/08/working-with-makefiles-in-clion-using-compilation-db/
-                self.add_required_system_tool("compiledb", install_instructions="Run `pip install --user compiledb``")
                 self._compiledb_tool = "compiledb"
             else:
-                self.add_required_system_tool("bear", homebrew="bear", cheribuild_target="bear")
                 self._compiledb_tool = "bear"
         self._force_clean = False
         self._prevent_assign = True
@@ -870,11 +873,8 @@ class Project(SimpleProject):
             install_dir_kind = self.get_default_install_dir_kind()
             # Install to SDK if CHERIBSD_ROOTFS is the install dir but we are not building for CheriBSD
             if install_dir_kind == DefaultInstallDir.ROOTFS_LOCALBASE:
-                if self.target_info.is_baremetal():
+                if self.target_info.is_newlib() or self.target_info.is_rtems():
                     self.destdir = typing.cast(Path, self.sdk_sysroot.parent)
-                    self._install_prefix = Path("/", self.target_info.target_triple)
-                elif self.target_info.is_rtems():
-                    self.destdir = self.sdk_sysroot.parent
                     self._install_prefix = Path("/", self.target_info.target_triple)
                 else:
                     self._install_prefix = Path("/", self.target_info.sysroot_install_prefix_relative)
@@ -947,7 +947,7 @@ class Project(SimpleProject):
         for d in deps:
             if d.xtarget is not self.crosscompile_target:
                 continue  # Don't add pkg-config directories for targets with a different architecture
-            project = d.get_or_create_project(None, self.config)
+            project = d.get_or_create_project(None, self.config, caller=self)
             install_dir = project.install_dir
             if install_dir is not None:
                 all_install_dirs[install_dir] = 1
@@ -972,10 +972,10 @@ class Project(SimpleProject):
         assert not self.compiling_for_host()
         result = dict()  # Use a dict to ensure reproducible order (guaranteed since Python 3.6)
         if self.needs_native_build_for_crosscompile:
-            result[self.get_install_dir(self, self.config, cross_target=BasicCompilationTargets.NATIVE)] = True
+            result[self.get_install_dir(self, cross_target=BasicCompilationTargets.NATIVE)] = True
         for d in self.cached_full_dependencies():
             if d.xtarget.is_native() and not d.project_class.is_toolchain_target():
-                result[d.get_or_create_project(d.xtarget, self.config).install_dir] = True
+                result[d.get_or_create_project(d.xtarget, self.config, caller=self).install_dir] = True
         result[self.config.other_tools_dir] = True
         return list(result.keys())
 
@@ -1078,8 +1078,10 @@ class Project(SimpleProject):
         return True
 
     @cached_property
-    def rootfs_dir(self):
-        return self.target_info.get_rootfs_project(t=Project).install_dir
+    def rootfs_dir(self) -> Path:
+        xtarget = self.crosscompile_target.get_rootfs_target()
+        # noinspection PyProtectedMember
+        return self.target_info._get_rootfs_class(xtarget).get_install_dir(self, xtarget)
 
     @property
     def _no_overwrite_allowed(self) -> "Sequence[str]":
@@ -1670,11 +1672,9 @@ class _CMakeAndMesonSharedLogic(Project):
             if value is None:
                 continue
             result = self._replace_value(result, required=True, key=key, value=value)
-        # work around jenkins paths that might contain @[0-9]+ in the path:
-        configured_jenkins_workaround = re.sub(r"@\d+", "", result)
-        at_index = configured_jenkins_workaround.find("@")
-        if at_index != -1:
-            self.fatal("Did not replace all keys:", configured_jenkins_workaround[at_index:],
+        not_substituted = re.search(r"@[\w_\d]+@", result)
+        if not_substituted:
+            self.fatal("Did not replace all keys, found", not_substituted.group(0), "at offset", not_substituted.span(),
                        fatal_when_pretending=True)
         self.write_file(contents=result, file=file, overwrite=True)
 
@@ -1719,16 +1719,16 @@ class _CMakeAndMesonSharedLogic(Project):
                                _config_file_options: "list[str]", **kwargs) -> None:
         for option, value in kwargs.items():
             existing_option = next((x for x in self.configure_args if x.startswith("-D" + option + "=")), None)
+            if any(x.startswith("-D" + option) for x in _config_file_options):
+                self.info("Not using default value of '", value, "' for configure option '", option,
+                          "' since it is explicitly overwritten in the configuration", sep="")
+                continue
             if existing_option is not None:
                 if _replace:
                     self.configure_args.remove(existing_option)
                 else:
                     self.warning("Not replacing ", option, "since it is already set.")
-                    return
-            if any(x.startswith("-D" + option) for x in _config_file_options):
-                self.info("Not using default value of '", value, "' for configure option '", option,
-                          "' since it is explicitly overwritten in the configuration", sep="")
-                continue
+                    continue
             if isinstance(value, bool):
                 value = self._bool_to_str(value)
             if (not str(value) or not value) and not _include_empty_vars:
@@ -1754,13 +1754,16 @@ class _CMakeAndMesonSharedLogic(Project):
     def _configure_tool_install_instructions(self) -> InstallInstructions:
         raise NotImplementedError()
 
-    def check_system_dependencies(self) -> None:
+    def setup(self):
+        super().setup()
         assert self.configure_command is not None
         if not Path(self.configure_command).is_absolute():
             abspath = shutil.which(self.configure_command)
             if abspath:
                 self.configure_command = abspath
-        super().check_system_dependencies()
+
+    def process(self) -> None:
+        super().process()
         if self._minimum_cmake_or_meson_version is not None:
             version_components = self._get_configure_tool_version()
             if version_components < self._minimum_cmake_or_meson_version:
@@ -1770,7 +1773,8 @@ class _CMakeAndMesonSharedLogic(Project):
                 install_instrs = self._configure_tool_install_instructions()
                 self.dependency_error(tool, "version", version_str, "is too old (need at least", expected_str + ")",
                                       install_instructions=install_instrs,
-                                      cheribuild_target=install_instrs.cheribuild_target)
+                                      cheribuild_target=install_instrs.cheribuild_target,
+                                      cheribuild_xtarget=BasicCompilationTargets.NATIVE)
 
 
 class AutotoolsProject(Project):
@@ -1789,9 +1793,9 @@ class AutotoolsProject(Project):
     Like Project but automatically sets up the defaults for autotools like projects
     Sets configure command to ./configure, adds --prefix=installdir
     """
-    def __init__(self, config, configure_script="configure") -> None:
-        super().__init__(config)
-        self.configure_command = self.source_dir / configure_script
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.configure_command = self.source_dir / "configure"
 
     def setup(self) -> None:
         super().setup()

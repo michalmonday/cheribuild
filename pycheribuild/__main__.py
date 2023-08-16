@@ -49,10 +49,11 @@ from .projects import *  # noqa: F401,F403
 # noinspection PyUnresolvedReferences
 from .projects.cross import *  # noqa: F401,F403
 from .projects.simple_project import SimpleProject
+from .projects.repository import GitRepository
 from .targets import target_manager, Target
 from .processutils import (get_program_version, print_command, run_and_kill_children_on_exit, run_command)
 from .utils import (AnsiColour, coloured, fatal_error, have_working_internet_connection, init_global_config,
-                    status_update)
+                    status_update, query_yes_no)
 DIRS_TO_CHECK_FOR_UPDATES: "list[Path]" = [Path(__file__).parent.parent]
 
 
@@ -70,6 +71,16 @@ def _update_check(config: DefaultCheriConfig, d: Path) -> None:
     # check if new commits are available
     project_dir = str(d)
     run_command(["git", "fetch"], cwd=project_dir, timeout=5, config=config)
+    branch_info = GitRepository.get_branch_info(d)
+    if branch_info.upstream_branch == "master":
+        if query_yes_no(config, f"The local {branch_info.local_branch} branch is tracking the obsolete remote 'master'"
+                                f" branch, would you like to switch to 'main'?", force_result=False):
+            # Update the remote ref to point to "main".
+            run_command("git", "branch", f"--set-upstream-to={branch_info.remote_name}/main", cwd=d)
+            if branch_info.local_branch == "master":
+                # And rename master to main if possible.
+                run_command("git", "branch", "-m", "main", cwd=d, allow_unexpected_returncode=True)
+
     output = run_command(["git", "status", "-uno"], cwd=project_dir, config=config, capture_output=True,
                          print_verbose_only=True).stdout
     behind_index = output.find(b"Your branch is behind ")
@@ -77,8 +88,8 @@ def _update_check(config: DefaultCheriConfig, d: Path) -> None:
         msg_end = output.find(b"\n  (use \"git pull\" to update your local branch)")
         if msg_end > 0:
             output = output[behind_index:msg_end]
-        status_update("Current", d.name, "checkout can be updated: ", output.decode("utf-8"))
-        if input("Would you like to update before continuing? y/[n] (Enter to skip) ").lower().startswith("y"):
+        status_update("Current", d.name, "checkout can be updated:", output.decode("utf-8"))
+        if query_yes_no(config, "Would you like to update before continuing?", force_result=False):
             git_version = get_program_version(Path(shutil.which("git") or "git"), config=config)
             # Use the autostash flag for Git >= 2.14
             # https://stackoverflow.com/a/30209750/894271
@@ -109,7 +120,7 @@ def get_config_option_value(option: ConfigOptionBase, config: DefaultCheriConfig
         project_cls: "type[SimpleProject]" = option._owning_class
         Target.instantiating_targets_should_warn = False
         t = target_manager.get_target(project_cls.target, None, config, caller="get_config_option")
-        obj = t.get_or_create_project(None, config)
+        obj = t._get_or_create_project_no_setup(None, config, caller=None)
         return option.__get__(obj, option._owning_class)
     # otherwise it must be a config option on CheriConfig:
     return option.__get__(config, type(config))

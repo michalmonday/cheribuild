@@ -28,7 +28,7 @@
 # SUCH DAMAGE.
 #
 from .cmake_project import CMakeProject
-from .project import CheriConfig, DefaultInstallDir, GitRepository
+from .project import DefaultInstallDir, GitRepository
 
 
 class BuildCheriTrace(CMakeProject):
@@ -41,15 +41,18 @@ class BuildCheriTrace(CMakeProject):
         super().setup_config_options()
         cls.include_python_bindings = cls.add_bool_option("python-bindings")
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
-        self.llvm_config_path = self.config.cheri_sdk_bindir / "llvm-config"
+    @property
+    def llvm_config_path(self):
+        return self.config.cheri_sdk_bindir / "llvm-config"
 
-    def configure(self):
-        if not self.llvm_config_path.is_file():
-            self.dependency_error("Could not find llvm-config from CHERI LLVM.", cheribuild_target="llvm")
+    def setup(self):
+        super().setup()
         self.add_cmake_options(
             LLVM_CONFIG=self.llvm_config_path,
             PYTHON_BINDINGS=self.include_python_bindings
-            )
-        super().configure()
+        )
+
+    def process(self) -> None:
+        super().process()
+        if not self.llvm_config_path.is_file():
+            self.dependency_error("Could not find llvm-config from CHERI LLVM.", cheribuild_target="llvm")

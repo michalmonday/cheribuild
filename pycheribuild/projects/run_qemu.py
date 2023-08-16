@@ -47,7 +47,7 @@ from .project import CheriConfig, CPUArchitecture, Project, ComputedDefaultValue
 from .simple_project import SimpleProject, TargetAliasWithDependencies
 from ..config.compilation_targets import CompilationTargets
 from ..qemu_utils import qemu_supports_9pfs, QemuOptions, riscv_bios_arguments
-from ..utils import AnsiColour, classproperty, coloured, find_free_port, OSInfo
+from ..utils import AnsiColour, classproperty, coloured, find_free_port, OSInfo, fatal_error
 
 
 def get_default_ssh_forwarding_port(addend: int):
@@ -111,7 +111,7 @@ class ChosenQEMU(object):
             # Only CHERI QEMU supports more than one SMB share; conservatively
             # guess what kind of QEMU this is
             self._can_provide_src_via_smb = launch.crosscompile_target.is_hybrid_or_purecap_cheri()
-            launch.add_required_system_tool(binary_name)
+            launch.check_required_system_tool(binary_name)
             binary_path = shutil.which(binary_name)
             if not binary_path:
                 launch.fatal("Could not find system QEMU", binary_name)
@@ -181,8 +181,8 @@ class LaunchQEMUBase(SimpleProject):
                                                          help="Additional TCP bridge ports beyond ssh/22; "
                                                               "list of [hostip:]port=[guestip:]port")
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.current_kernel = None  # type: typing.Optional[Path]
         self.disk_image = None  # type: typing.Optional[Path]
         self.disk_image_format = "raw"
@@ -203,7 +203,7 @@ class LaunchQEMUBase(SimpleProject):
         cls._cached_chosen_qemu = None
 
     @classmethod
-    def get_chosen_qemu(cls, config):
+    def get_chosen_qemu(cls, config: CheriConfig):
         if cls._cached_chosen_qemu:
             return cls._cached_chosen_qemu
 
@@ -233,12 +233,13 @@ class LaunchQEMUBase(SimpleProject):
             # guess what kind of QEMU this is
             can_provide_src_via_smb = xtarget.is_hybrid_or_purecap_cheri()
             if not cls.custom_qemu_path:
-                cls.fatal("Must specify path to custom QEMU with --" + cls.target + "/custom-qemu-path")
+                fatal_error("Must specify path to custom QEMU with --" + cls.target + "/custom-qemu-path",
+                            pretend=config.pretend)
                 qemu_binary = Path("/no/custom/path/to/qemu")
             else:
                 qemu_binary = Path(cls.custom_qemu_path)
             if not qemu_binary.is_file():
-                cls.fatal("Custom QEMU", cls.custom_qemu_path, "is not a file")
+                fatal_error("Custom QEMU", cls.custom_qemu_path, "is not a file", pretend=config.pretend)
             qemu_class = None
         else:
             if cls.use_qemu == QEMUType.DEFAULT:
@@ -250,7 +251,8 @@ class LaunchQEMUBase(SimpleProject):
                     QEMUType.UPSTREAM: BuildUpstreamQEMU
                 }[cls.use_qemu]
                 if qemu_class not in supported_qemu_classes:
-                    cls.fatal("Cannot use", cls.use_qemu.value, "QEMU with target", xtarget.generic_target_suffix)
+                    fatal_error("Cannot use", cls.use_qemu.value, "QEMU with target", xtarget.generic_target_suffix,
+                                pretend=config.pretend)
                     qemu_class = None
                     qemu_binary = Path("/target/not/supported/with/this/qemu")
                 else:
@@ -266,7 +268,7 @@ class LaunchQEMUBase(SimpleProject):
             if qemu_binary is None:
                 if qemu_class is None:
                     # Deferred until setup time when we have an instance (need
-                    # qemu_options member and add_required_system_tool)
+                    # qemu_options member and check_required_system_tool)
                     can_provide_src_via_smb = None
                     qemu_binary = None
                 else:
@@ -290,7 +292,8 @@ class LaunchQEMUBase(SimpleProject):
     def process(self):
         if not self.chosen_qemu.binary.exists():
             self.dependency_error("QEMU is missing:", self.chosen_qemu.binary,
-                                  cheribuild_target=self.chosen_qemu.cls.target if self.chosen_qemu.cls else None)
+                                  cheribuild_target=self.chosen_qemu.cls.target if self.chosen_qemu.cls else None,
+                                  cheribuild_xtarget=CompilationTargets.NATIVE)
 
         qemu_loader_or_kernel = self.current_kernel
         if self.use_uboot:
@@ -309,8 +312,10 @@ class LaunchQEMUBase(SimpleProject):
                              "- falling back on kernel")
 
         if qemu_loader_or_kernel is not None and not qemu_loader_or_kernel.exists():
-            kernel_target = self.kernel_project.target if self.kernel_project is not None else None
-            self.dependency_error("Loader/kernel is missing:", qemu_loader_or_kernel, cheribuild_target=kernel_target)
+            kernel_target_name = self.kernel_project.target if self.kernel_project is not None else None
+            kernel_xtarget = self.kernel_project.crosscompile_target if self.kernel_project is not None else None
+            self.dependency_error("Loader/kernel is missing:", qemu_loader_or_kernel,
+                                  cheribuild_target=kernel_target_name, cheribuild_xtarget=kernel_xtarget)
 
         if self.forward_ssh_port and not self.is_port_available(self.ssh_forwarding_port):
             self.print_port_usage(self.ssh_forwarding_port)
@@ -348,8 +353,11 @@ class LaunchQEMUBase(SimpleProject):
         if self.cvtrace:
             logfile_options += ["-cheri-trace-format", "cvtrace"]
         if self.disk_image is not None and not self.disk_image.exists():
-            disk_image_target = self.disk_image_project.target if self.disk_image_project is not None else None
-            self.dependency_error("Disk image is missing:", self.disk_image, cheribuild_target=disk_image_target)
+            disk_image_target_name = self.disk_image_project.target if self.disk_image_project is not None else None
+            disk_image_xtarget = (
+                self.disk_image_project.crosscompile_target if self.disk_image_project is not None else None)
+            self.dependency_error("Disk image is missing:", self.disk_image, cheribuild_target=disk_image_target_name,
+                                  cheribuild_xtarget=disk_image_xtarget)
 
         user_network_options = ""
         smb_dir_count = 0
@@ -569,6 +577,8 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
     kernel_project: typing.Optional[BuildFreeBSD]
     disk_image_project: typing.Optional[BuildDiskImageBase]
 
+    kernel_config: str
+
     @classmethod
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(**kwargs)
@@ -585,18 +595,24 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
             kind=KernelABI, enum_choices=[KernelABI.HYBRID, KernelABI.PURECAP],
             help="Select extra kernel variant with the given ABI to run.")
 
-    def __init__(self, config: CheriConfig, freebsd_class: "typing.Type[BuildFreeBSD]" = None,
-                 disk_image_class: "typing.Type[BuildDiskImageBase]" = None, needs_disk_image=True):
-        super().__init__(config)
-        if freebsd_class is None and disk_image_class is not None:
+    def __init__(self, config: CheriConfig, *, freebsd_class: "typing.Type[BuildFreeBSD]" = None,
+                 disk_image_class: "typing.Type[BuildDiskImageBase]" = None, needs_disk_image=True, **kwargs):
+        super().__init__(config, **kwargs)
+        self.freebsd_class = freebsd_class
+        self.disk_image_class = disk_image_class
+        self.needs_disk_image = needs_disk_image
+
+    def setup(self) -> None:
+        super().setup()
+        if self.freebsd_class is None and self.disk_image_class is not None:
             # noinspection PyProtectedMember
-            disk_image_instance = disk_image_class.get_instance(self)
+            disk_image_instance = self.disk_image_class.get_instance(self)
             self.disk_image_project = disk_image_instance
             self.kernel_project = disk_image_instance.source_project
             if disk_image_instance.use_qcow2:
                 self.disk_image_format = "qcow2"
         else:
-            self.kernel_project = freebsd_class.get_instance(self)
+            self.kernel_project = self.freebsd_class.get_instance(self)
 
         if self.kernel_config:
             if self.kernel_config not in self._valid_kernel_configs():
@@ -611,14 +627,14 @@ class AbstractLaunchFreeBSD(LaunchQEMUBase):
                     self.warning("Can not select kernel ABI to run for non-CHERI target, ignoring --kernel-abi")
             self.kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, **config_filters)
 
-        if self.qemu_options.can_boot_kernel_directly:
+        if self.qemu_options.can_boot_kernel_directly and self.current_kernel is None:
             self.current_kernel = self.kernel_project.get_kernel_install_path(self.kernel_config)
             kern_module_path_arg = self.kernel_project.get_kern_module_path_arg(self.kernel_config)
             if kern_module_path_arg:
                 self._project_specific_options += ["-append", kern_module_path_arg]
-        self.rootfs_path = self.kernel_project.get_rootfs_dir(self, config=config)
-        if needs_disk_image:
-            self.disk_image = disk_image_class.get_instance(self).disk_image_path
+        self.rootfs_path = self.kernel_project.get_rootfs_dir(self)
+        if self.needs_disk_image:
+            self.disk_image = self.disk_image_class.get_instance(self).disk_image_path
 
     def _valid_kernel_configs(self):
         return self.kernel_project.get_kernel_configs(platform=ConfigPlatform.QEMU)
@@ -688,9 +704,9 @@ class _RunMultiArchFreeBSDImage(AbstractLaunchFreeBSD):
             result.append(cls._disk_image_class.get_class_for_target(xtarget).target)
         return result
 
-    def __init__(self, config, *, needs_disk_image=True):
-        super().__init__(config, needs_disk_image=needs_disk_image, freebsd_class=self._freebsd_class,
-                         disk_image_class=self._disk_image_class)
+    def __init__(self, *args, needs_disk_image=True, **kwargs):
+        super().__init__(*args, needs_disk_image=needs_disk_image, freebsd_class=self._freebsd_class,
+                         disk_image_class=self._disk_image_class, **kwargs)
 
     def run_tests(self):
         rootfs_kernel_bootdir = None
@@ -742,11 +758,14 @@ class LaunchCheriOSQEMU(LaunchQEMUBase):
     def setup_config_options(cls, **kwargs):
         super().setup_config_options(default_ssh_port=get_default_ssh_forwarding_port(40), **kwargs)
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
+    @property
+    def source_project(self):
+        return BuildCheriOS.get_instance(self, self.config)
+
+    def setup(self):
+        super().setup()
         # FIXME: these should be config options
-        cherios = BuildCheriOS.get_instance(self, config)
-        self.source_project = cherios
+        cherios = BuildCheriOS.get_instance(self, self.config)
         self.current_kernel = cherios.build_dir / "boot/cherios.elf"
         self.disk_image = self.config.output_root / "cherios-disk.img"
         self._project_specific_options = ["-no-reboot", "-global", "virtio-mmio.force-legacy=false"]
@@ -784,8 +803,8 @@ class LaunchDmQEMU(LaunchCheriBSD):
     _add_virtio_rng = False
     hide_options_from_help = True
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.qemu_user_networking = False
 
     def process(self):
@@ -839,14 +858,14 @@ class LaunchCheriBsdMfsRoot(LaunchMinimalCheriBSD):
         return list(set(arches) -
                     set([CompilationTargets.CHERIBSD_AARCH64] + CompilationTargets.ALL_CHERIBSD_MORELLO_TARGETS))
 
-    def __init__(self, config):
-        super().__init__(config, needs_disk_image=False)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, needs_disk_image=False, **kwargs)
         if self.config.use_minimal_benchmark_kernel:
             kernel_config = self.kernel_project.default_kernel_config(ConfigPlatform.QEMU, benchmark=True)
             self.current_kernel = self.kernel_project.get_kernel_install_path(kernel_config)
             if str(self.remote_kernel_path).endswith("MFS_ROOT"):
                 self.remote_kernel_path += "_BENCHMARK"
-        self.rootfs_path = BuildCHERIBSD.get_rootfs_dir(self, config)
+        self.rootfs_path = BuildCHERIBSD.get_rootfs_dir(self)
 
 
 class BuildAndRunCheriBSD(TargetAliasWithDependencies):

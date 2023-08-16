@@ -51,6 +51,8 @@ class MesonProject(_CMakeAndMesonSharedLogic):
     set_pkg_config_path: bool = False
     _configure_tool_name: str = "Meson"
     meson_test_script_extra_args: "Sequence[str]" = tuple()  # additional arguments to pass to run_meson_tests.py
+    _meson_extra_binaries = ""  # Needed for picolibc
+    _meson_extra_properties = ""  # Needed for picolibc
 
     def set_minimum_meson_version(self, major: int, minor: int, patch: int = 0) -> None:
         new_version = (major, minor, patch)
@@ -59,7 +61,7 @@ class MesonProject(_CMakeAndMesonSharedLogic):
 
     def _configure_tool_install_instructions(self) -> InstallInstructions:
         return OSInfo.install_instructions(
-            "meson", False, default="meson",
+            "meson", False, default="meson", homebrew="meson", zypper="meson", freebsd="meson", apt="meson",
             alternative="run `pip3 install --upgrade --user meson` to install the latest version")
 
     @classmethod
@@ -68,17 +70,11 @@ class MesonProject(_CMakeAndMesonSharedLogic):
         cls.meson_options = cls.add_config_option("meson-options", default=[], kind=list, metavar="OPTIONS",
                                                   help="Additional command line options to pass to Meson")
 
-    def __init__(self, config) -> None:
-        super().__init__(config)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.configure_command = os.getenv("MESON_COMMAND", None)
         if self.configure_command is None:
             self.configure_command = "meson"
-            # Ubuntu/Debian's packages are way too old, suggest pip instead
-            install_instructions = None
-            if OSInfo.is_ubuntu() or OSInfo.is_debian():
-                install_instructions = "Try running `pip3 install --upgrade --user meson`"
-            self.add_required_system_tool("meson", homebrew="meson", zypper="meson", freebsd="meson", apt="meson",
-                                          install_instructions=install_instructions)
         self.configure_args.insert(0, "setup")
         # We generate a toolchain file when cross-compiling and the toolchain files need at least 0.57
         self.set_minimum_meson_version(0, 57)
@@ -96,7 +92,7 @@ class MesonProject(_CMakeAndMesonSharedLogic):
         super().setup()
         self._toolchain_template = include_local_file("files/meson-machine-file.ini.in")
         if not self.compiling_for_host():
-            assert self.target_info.is_freebsd(), "Only tested with FreeBSD so far"
+            assert self.target_info.is_freebsd() or self.target_info.is_baremetal(), "Only tested FreeBSD/baremetal"
             self._toolchain_file = self.build_dir / "meson-cross-file.ini"
             self.configure_args.extend(["--cross-file", str(self._toolchain_file)])
             # We also have to pass a native machine file to override pkg-config/cmake search dirs for host tools
@@ -157,6 +153,8 @@ class MesonProject(_CMakeAndMesonSharedLogic):
             TOOLCHAIN_LINKER=self.target_info.linker,
             TOOLCHAIN_MESON_CPU_FAMILY=self.crosscompile_target.cpu_architecture.as_meson_cpu_family(),
             TOOLCHAIN_ENDIANESS=self.crosscompile_target.cpu_architecture.endianess(),
+            MESON_EXTRA_BINARIES=self._meson_extra_binaries,
+            MESON_EXTRA_PROPERTIES=self._meson_extra_properties,
             TOOLCHAIN_PKGCONFIG_BINARY=pkg_config_bin,
             TOOLCHAIN_CMAKE_BINARY=cmake_bin,
         )

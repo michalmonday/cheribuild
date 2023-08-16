@@ -95,12 +95,15 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
             return Linkage.STATIC
         return super().linkage()
 
-    def __init__(self, config: CheriConfig):
-        self._compile_status_message = None
-        super().__init__(config)
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
         if self.compiling_for_host() and self.target_info.is_cheribsd():
-            self.add_required_pkg_config("gmp", freebsd="gmp")
-            self.add_required_pkg_config("expat", freebsd="expat")
+            self.check_required_pkg_config("gmp", freebsd="gmp")
+            self.check_required_pkg_config("expat", freebsd="expat")
+
+    def __init__(self, *args, **kwargs):
+        self._compile_status_message = None
+        super().__init__(*args, **kwargs)
 
     def setup(self) -> None:
         super().setup()
@@ -185,8 +188,6 @@ class BuildGDBBase(CrossCompileAutotoolsProject):
             self.LDFLAGS.append("-lelf")
             self.LDFLAGS.append("-lmd")
             self.configure_environment.update(CONFIGURED_M4="m4", CONFIGURED_BISON="byacc", TMPDIR="/tmp", LIBS="")
-            # Look in /usr/lib not /usr/local/lib
-            self.configure_args.append("--with-separate-debug-dir=/usr/lib/debug")
             self.configure_environment["CC_FOR_BUILD"] = str(self.host_CC)
             self.configure_environment["CXX_FOR_BUILD"] = str(self.host_CXX)
             self.configure_environment["CFLAGS_FOR_BUILD"] = "-g -fcommon"

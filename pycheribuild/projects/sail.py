@@ -28,7 +28,6 @@
 # SUCH DAMAGE.
 #
 import os
-import shlex
 import shutil
 import tempfile
 import typing
@@ -36,11 +35,11 @@ from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Any, Dict, Tuple, Union
 
-from .project import AutotoolsProject, CheriConfig, DefaultInstallDir, GitRepository, MakeCommandKind, Project
+from .project import AutotoolsProject, DefaultInstallDir, GitRepository, MakeCommandKind, Project
 from .simple_project import SimpleProject
 from ..processutils import get_program_version
 from ..targets import target_manager
-from ..utils import AnsiColour, coloured, OSInfo, ThreadJoiner, InstallInstructions
+from ..utils import AnsiColour, coloured, OSInfo, ThreadJoiner
 
 if typing.TYPE_CHECKING:
     _MixinBase = Project
@@ -53,7 +52,6 @@ class OpamMixin(_MixinBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.add_required_system_tool("opam", homebrew="opam", apt="opam", cheribuild_target="opam-2.0")
         self.required_ocaml_version = "4.11.1"
         self.__using_correct_switch = False
         self.__ignore_switch_version = False
@@ -62,8 +60,9 @@ class OpamMixin(_MixinBase):
     def opamroot(self):
         return self.config.cheri_sdk_dir / "opamroot"
 
-    def check_system_dependencies(self):
-        super().check_system_dependencies()
+    def process(self):
+        super().process()
+        self.check_required_system_tool("opam", homebrew="opam", apt="opam", cheribuild_target="opam-2.0")
         opam_path = shutil.which("opam")
         if opam_path:
             opam_version = get_program_version(Path(opam_path), regex=b"(\\d+)\\.(\\d+)\\.?(\\d+)?",
@@ -148,10 +147,10 @@ class OpamMixin(_MixinBase):
 class Opam2(SimpleProject):
     target = "opam-2.0"
 
-    def __init__(self, config):
-        super().__init__(config)
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
         if OSInfo.IS_LINUX:
-            self.add_required_system_tool("bwrap", cheribuild_target="bubblewrap")
+            self.check_required_system_tool("bwrap", cheribuild_target="bubblewrap")
 
     def process(self):
         if OSInfo.IS_LINUX and self.crosscompile_target.is_x86_64():
@@ -173,9 +172,12 @@ class BuildBubbleWrap(AutotoolsProject):
     repository = GitRepository("https://github.com/projectatomic/bubblewrap")
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.add_required_system_header("sys/capability.h", apt="libcap-dev")
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
+        self.check_required_system_header("sys/capability.h", apt="libcap-dev")
+
+    def setup(self):
+        super().setup()
         self.configure_args.append("--with-bash-completion-dir=no")
 
 
@@ -193,9 +195,9 @@ class BuildSailFromOpam(ProjectUsingOpam):
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
 
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
-        self.add_required_system_tool("z3", homebrew="z3 --without-python@2 --with-python")
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
+        self.check_required_system_tool("z3", homebrew="z3 --without-python@2 --with-python")
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -256,9 +258,9 @@ class BuildSailCheriMips(ProjectUsingOpam):
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.add_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
+        self.check_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -290,10 +292,19 @@ class RunSailShell(OpamMixin, SimpleProject):
         self.info("Starting sail shell (using {})... ".format(shell))
         import subprocess
         try:
-            with self.set_env(PATH=str(self.config.cheri_sdk_bindir) + ":" + os.getenv("PATH", ""),
-                              PS1="SAIL ENV:\\w> "):
-                self.run_cmd("which", "sail")
-                self.run_command_in_ocaml_env([shell, "--verbose", "--norc", "-i"], cwd=os.getcwd())
+            prompt_env = {}
+            if "_P9K_TTY" in os.environ or "P9K_TTY" in os.environ:
+                # Set a variable that shows we are in the sail env for the default powerlevel10k prompt.
+                # We could also use various other right hand side prompts, but toolbox seems unlikely to conflict.
+                prompt_env["P9K_TOOLBOX_NAME"] = "sail-opam-env"
+            else:
+                # Otherwise set the VIRTUAL_ENV environment variable if not already present (this should hopefully
+                # be visualized by many custom shell prompts)
+                prompt_env["VIRTUAL_ENV"] = os.getenv("VIRTUAL_ENV", "sail-opam-env"),
+            with self.set_env(PATH=str(self.config.cheri_sdk_bindir) + ":" + os.getenv("PATH", ""), **prompt_env):
+                self.run_command_in_ocaml_env(
+                    [shell, "-c", f"echo 'Entering sail environment, send CTRL+D to exit'; exec {shell} -i"],
+                    cwd=os.getcwd())
         except subprocess.CalledProcessError as e:
             if e.returncode == 130:
                 return  # User pressed Ctrl+D to exit shell, don't print an error
@@ -308,9 +319,9 @@ class BuildSailRISCV(ProjectUsingOpam):
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.add_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
+        self.check_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
 
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
@@ -332,9 +343,9 @@ class BuildSailCheriRISCV(ProjectUsingOpam):
     build_in_source_dir = True  # Cannot build out-of-source
     make_kind = MakeCommandKind.GnuMake
 
-    def __init__(self, config):
-        super().__init__(config)
-        self.add_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
+    def check_system_dependencies(self):
+        super().check_system_dependencies()
+        self.check_required_system_header("gmp.h", homebrew="gmp", apt="libgmp-dev")
 
     def compile(self, **kwargs):
         for arch in ("RV64", "RV32"):
@@ -346,122 +357,3 @@ class BuildSailCheriRISCV(ProjectUsingOpam):
         self.make_args.set(INSTALL_DIR=self.config.cheri_sdk_dir)
         # self.run_make_install()
         self.info("NO INSTALL TARGET YET")
-
-
-# Old way of installing sail:
-class OcamlProject(OpamMixin, Project):
-    do_not_add_to_targets = True
-    native_install_dir = DefaultInstallDir.CHERI_SDK
-    build_in_source_dir = True
-    make_kind = MakeCommandKind.GnuMake
-    needed_ocaml_packages = ["ocamlbuild"]
-
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
-
-    def check_system_dependencies(self):
-        super().check_system_dependencies()
-        for pkg in self.needed_ocaml_packages:
-            try:
-                self.run_in_ocaml_env("ocamlfind query " + shlex.quote(pkg), cwd="/", print_verbose_only=True)
-            except CalledProcessError:
-                instrs = "Try running `" + self._opam_cmd_str("install", _add_switch=False) + " " + pkg + "`"
-                self.dependency_error("missing opam package " + pkg, install_instructions=InstallInstructions(instrs))
-
-    def install(self, **kwargs):
-        pass
-
-    def process(self):
-        try:
-            # This is run before cloning so the source dir might not exist -> set CWD to /
-            self.run_in_ocaml_env("ocamlfind ocamlc -where", cwd="/", print_verbose_only=True)
-        except CalledProcessError as e:
-            self.warning(e)
-            self.warning("stderr was:", e.stderr)
-            hint = "Try running `" + self._opam_cmd_str("update", _add_switch=False) + " && " + self._opam_cmd_str(
-                "switch", _add_switch=False) + " " + self.required_ocaml_version + "`"
-            self.dependency_error("OCaml env seems to be messed up. Note: On MacOS homebrew OCaml is not installed"
-                                  " correctly. Try installing it with opam instead:",
-                                  install_instructions=InstallInstructions(hint))
-        super().process()
-
-
-class BuildSailFromSource(OcamlProject):
-    target = "sail-from-source"
-    repository = GitRepository("https://github.com/rems-project/sail", default_branch="sail2")
-    dependencies = ["lem", "ott", "linksem"]
-    needed_ocaml_packages = OcamlProject.needed_ocaml_packages + ["zarith", "lem", "linksem"]
-
-    # TODO: `opam install linenoise` for isail?
-
-    def __init__(self, config: CheriConfig):
-        super().__init__(config)
-        self.add_required_system_tool("z3", homebrew="z3 --without-python@2 --with-python")
-
-    def check_system_dependencies(self):
-        super().check_system_dependencies()
-        try:
-            # opam and ocamlfind don't agree for menhir
-            self.run_in_ocaml_env("ocamlfind query menhirLib", cwd="/", print_verbose_only=True)
-        except CalledProcessError:
-            self.dependency_error("missing opam package menhirLib",
-                                  install_instructions=InstallInstructions("Try running `opam install menhir`"))
-
-    def compile(self, **kwargs):
-        pass
-
-    def install(self, **kwargs):
-        # Use ./opam to just build sail, not coq-sail.  Using '.' will try to
-        # build both and we probably don't need all of coq installed just now
-        self.run_in_ocaml_env("opam install -y ./opam")
-
-    def process(self):
-        lemdir = BuildLem.get_source_dir(self)
-        ottdir = BuildOtt.get_source_dir(self)
-        linksemdir = BuildLinksem.get_source_dir(self)
-        with self.set_env(LEMLIB=lemdir / "library",
-                          PATH="{}:{}:".format(ottdir / "bin", lemdir / "bin") + os.environ["PATH"],
-                          OCAMLPATH="{}:{}".format(lemdir / "ocaml-lib/local", linksemdir / "src/local")):
-            super().process()
-
-
-class BuildLem(OcamlProject):
-    repository = GitRepository("https://github.com/rems-project/lem")
-    needed_ocaml_packages = OcamlProject.needed_ocaml_packages + ["zarith"]
-
-    def compile(self, **kwargs):
-        pass
-
-    def install(self, **kwargs):
-        self.run_in_ocaml_env("opam install -y .")
-
-
-class BuildOtt(OcamlProject):
-    repository = GitRepository("https://github.com/ott-lang/ott")
-
-    def compile(self, **kwargs):
-        pass
-
-    def install(self, **kwargs):
-        # Use ./ott.opam to dodge coq-ott
-        self.run_in_ocaml_env("opam install -y ./ott.opam")
-
-
-class BuildLinksem(OcamlProject):
-    repository = GitRepository("https://github.com/rems-project/linksem")
-    dependencies = ["lem", "ott"]
-
-    def compile(self, **kwargs):
-        pass
-
-    def install(self, **kwargs):
-        self.run_in_ocaml_env("opam install -y .")
-
-    def process(self):
-        lemdir = BuildLem.get_source_dir(self)
-        ottdir = BuildOtt.get_source_dir(self)
-        # linksemdir = BuildLinkSem.get_source_dir(self)
-        with self.set_env(LEMLIB=lemdir / "library",
-                          PATH="{}:{}:".format(ottdir / "bin", lemdir / "bin") + os.environ["PATH"],
-                          OCAMLPATH=lemdir / "ocaml-lib/local"):
-            super().process()

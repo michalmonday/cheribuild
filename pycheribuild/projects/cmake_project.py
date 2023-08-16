@@ -79,7 +79,8 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         return "TRUE" if value else "FALSE"
 
     def _configure_tool_install_instructions(self) -> InstallInstructions:
-        return OSInfo.install_instructions("cmake", False, default="cmake", cheribuild_target="cmake")
+        return OSInfo.install_instructions("cmake", False, default="cmake", homebrew="cmake", zypper="cmake",
+                                           apt="cmake", freebsd="cmake", cheribuild_target="cmake")
 
     @property
     def _get_version_args(self) -> dict:
@@ -96,12 +97,11 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         cls.cmake_options = cls.add_config_option("cmake-options", default=[], kind=list, metavar="OPTIONS",
                                                   help="Additional command line options to pass to CMake")
 
-    def __init__(self, config) -> None:
-        super().__init__(config)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
         self.configure_command = os.getenv("CMAKE_COMMAND", None)
         if self.configure_command is None:
             self.configure_command = "cmake"
-            self.add_required_system_tool("cmake", homebrew="cmake", zypper="cmake", apt="cmake", freebsd="cmake")
         # allow a -G flag in cmake-options to override the default generator (Ninja).
         custom_generator = next((x for x in self.cmake_options if x.startswith("-G")), None)
         generator = custom_generator if custom_generator else self._default_cmake_generator_arg
@@ -110,12 +110,16 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         self.build_type_var_suffix = ""
         if "Ninja" in generator:
             self.make_args.subkind = MakeCommandKind.Ninja
-            self.add_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
+            self.check_required_system_tool("ninja", homebrew="ninja", apt="ninja-build")
         elif "Makefiles" in generator:
             self.make_args.subkind = MakeCommandKind.DefaultMake
-            self.add_required_system_tool("make")
+            self.check_required_system_tool("make")
         else:
             self.make_args.subkind = MakeCommandKind.CustomMakeTool  # VS/XCode, etc.
+        self._toolchain_file: "Optional[Path]" = None
+        if not self.compiling_for_host():
+            self._toolchain_template = include_local_file("files/CrossToolchain.cmake.in")
+            self._toolchain_file = self.build_dir / "CrossToolchain.cmake"
 
     def setup(self) -> None:
         super().setup()
@@ -140,19 +144,18 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
         if self.config.create_compilation_db:
             # TODO: always generate it?
             self.configure_args.append("-DCMAKE_EXPORT_COMPILE_COMMANDS=ON")
-        self._toolchain_file: "Optional[Path]" = None
         if self.compiling_for_host():
             # When building natively, pass arguments on the command line instead of using the toolchain file.
             # This makes it a lot easier to reproduce the builds outside cheribuild.
             self.add_cmake_options(CMAKE_PREFIX_PATH=self._toolchain_file_list_to_str(self.cmake_prefix_paths))
         else:
-            self._toolchain_template = include_local_file("files/CrossToolchain.cmake.in")
-            self._toolchain_file = self.build_dir / "CrossToolchain.cmake"
             self.add_cmake_options(CMAKE_TOOLCHAIN_FILE=self._toolchain_file)
 
         if self.install_prefix != self.install_dir:
             assert self.destdir, "custom install prefix requires DESTDIR being set!"
             self.add_cmake_options(CMAKE_INSTALL_PREFIX=self.install_prefix)
+            if self.target_info.is_baremetal() and str(self.install_prefix) == "/":
+                self.add_cmake_options(CMAKE_INSTALL_INCLUDEDIR="/include"),  # Don't add the extra /usr in the sysroot
         else:
             self.add_cmake_options(CMAKE_INSTALL_PREFIX=self.install_dir)
         if not self.compiling_for_host():
@@ -188,7 +191,7 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
             # Fixed in https://gitlab.kitware.com/cmake/cmake/-/merge_requests/6240 (3.21.20210625)
             self.add_cmake_options(
                 CMAKE_BUILD_WITH_INSTALL_RPATH=self._get_configure_tool_version() < (3, 21, 20210625))
-        # NB: Don't add the user provided options here, we append add them in configure() so that they are put last.
+        # NB: Don't add the user provided options here, we append add them in setup_late() so that they are put last.
 
     def setup_late(self):
         super().setup_late()
@@ -219,7 +222,7 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
             self.add_cmake_options(**{f"CMAKE_C_FLAGS{self.build_type_var_suffix}": flags,
                                       f"CMAKE_CXX_FLAGS{self.build_type_var_suffix}": flags})
         # Add the options from the config file now so that they are added after child class setup() calls.
-        self.configure_args.extend(self.cmake_options)  # FIXME: probably shouldn't modify this list
+        self.configure_args.extend(self.cmake_options)
 
     def add_cmake_options(self, *, _include_empty_vars=False, _replace=True, **kwargs) -> None:
         return self._add_configure_options(_config_file_options=self.cmake_options, _replace=_replace,
@@ -289,13 +292,13 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
                     expected_ctest_path = cmake_project.install_dir / "bin/ctest"
                     if not expected_ctest_path.is_file():
                         self.dependency_error(f"cannot find CTest binary ({expected_ctest_path}) to run tests.",
-                                              cheribuild_target=cmake_project.target)
+                                              cheribuild_target=cmake_project.target, cheribuild_xtarget=cmake_xtarget)
                     # --output-junit needs version 3.21
                     min_version = "3.21"
                     if not list(cmake_project.install_dir.glob("share/*/Help/release/" + min_version + ".rst")):
                         self.dependency_error("cannot find release notes for CMake", min_version,
                                               "- installed CMake version is too old",
-                                              cheribuild_target=cmake_project.target)
+                                              cheribuild_target=cmake_project.target, cheribuild_xtarget=cmake_xtarget)
                 except LookupError:
                     self.warning("Do not know how to cross-compile CTest for", self.target_info, "-> cannot run tests")
                     return

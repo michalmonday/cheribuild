@@ -65,11 +65,11 @@ class BuildSyzkaller(CrossCompileProject):
             help="Rerun syz-extract and syz-sysgen to rebuild generated Go "
                  "syscall descriptions.")
 
-    def __init__(self, config):
+    def __init__(self, config, *args, **kwargs):
         self._install_prefix = config.cheri_sdk_dir
         self._install_dir = config.cheri_sdk_dir
         self.destdir = Path("")
-        super().__init__(config)
+        super().__init__(config, *args, **kwargs)
 
         # self.gopath = source_base / gohome
         self.goroot = config.cheri_sdk_dir / "go"
@@ -83,7 +83,7 @@ class BuildSyzkaller(CrossCompileProject):
         self._new_path = (str(self.config.cheri_sdk_dir / "bin") + ":" +
                           str(self.config.dollar_path_with_other_tools))
 
-        cheribsd_target = self.get_crosscompile_target().get_rootfs_target()
+        cheribsd_target = self.crosscompile_target.get_rootfs_target()
         self.cheribsd_dir = BuildCHERIBSD.get_source_dir(self, cross_target=cheribsd_target)
 
     def syzkaller_install_path(self):

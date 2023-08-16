@@ -354,7 +354,7 @@ class InstallInstructions:
                  cheribuild_target: "typing.Optional[str]" = None, alternative: str = None):
         self._message = message
         self.cheribuild_target = cheribuild_target
-        self._alternative = alternative
+        self.alternative = alternative
 
     def fixit_hint(self) -> str:
         if callable(self._message):
@@ -367,9 +367,9 @@ class InstallInstructions:
             else:
                 result = "Run "
             result += "`cheribuild.py " + self.cheribuild_target + "` to install locally."
-        if self._alternative:
+        if self.alternative:
             assert result, "Can't have an alternative without a default option!"
-            result += "\nAlternatively " + self._alternative
+            result += "\nAlternatively " + self.alternative
         return result
 
 
@@ -414,7 +414,10 @@ class OSInfo(object):
         with Path("/etc/os-release").open(encoding="utf-8") as f:
             d = {}
             for line in f:
-                k, v = line.rstrip().split("=", maxsplit=1)
+                line = line.strip()
+                if line == '' or line[0] == '#':
+                    continue
+                k, v = line.split("=", maxsplit=1)
                 # .strip('"') will remove if there or else do nothing
                 d[k] = v.strip('"')
         return d

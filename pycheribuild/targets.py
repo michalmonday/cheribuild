@@ -36,7 +36,8 @@ from collections import OrderedDict
 from .config.chericonfig import CheriConfig
 from .config.target_info import CrossCompileTarget, AbstractProject
 from .processutils import set_env
-from .utils import add_error_context, AnsiColour, coloured, fatal_error, status_update, warning_message, query_yes_no
+from .utils import (add_error_context, AnsiColour, coloured, fatal_error, status_update, warning_message, query_yes_no,
+                    final)
 
 if typing.TYPE_CHECKING:  # no-combine
     from .projects.simple_project import SimpleProject  # no-combine
@@ -61,23 +62,41 @@ class Target(object):
         assert result._xtarget is not None
         return result
 
+    # noinspection PyProtectedMember
     @property
     def xtarget(self):
         result = self._project_class
-        # noinspection PyProtectedMember
         assert result._xtarget is not None
         return result._xtarget
 
     def get_real_target(self, cross_target: typing.Optional[CrossCompileTarget], config, caller=None) -> "Target":
         return self
 
-    def get_or_create_project(self, target_arch: typing.Optional[CrossCompileTarget], config) -> "SimpleProject":
-        # Note: MultiArchTarget uses caller to select the right project (e.g. libcxxrt-native needs libunwind-native
-        # path)
+    def _get_or_create_project_no_setup(self, _: typing.Optional[CrossCompileTarget], config,
+                                        caller: "typing.Optional[AbstractProject]") -> "SimpleProject":
+        # Note: MultiArchTarget uses cross_target to select the right project (e.g. libcxxrt-native needs
+        # libunwind-native path)
         if self.__project is None:
             self.__project = self.create_project(config)
+            self.cache_dependencies(config)
         assert self.__project is not None
         return self.__project
+
+    # noinspection PyProtectedMember
+    @final
+    def get_or_create_project(self, cross_target: typing.Optional[CrossCompileTarget], config,
+                              caller: "typing.Optional[SimpleProject]") -> "SimpleProject":
+        if caller is not None:
+            # noinspection PyProtectedMember
+            assert caller._init_called, "Cannot call this inside __init__()"
+        project = self._get_or_create_project_no_setup(cross_target, config, caller)
+        if not project._setup_called:
+            project.setup()
+        if not project._setup_late_called:
+            project.setup_late()
+        assert project._setup_called, str(self._project_class) + ": forgot to call super().setup()?"
+        assert project._setup_late_called, str(self._project_class) + ": forgot to call super().setup_late()?"
+        return project
 
     def get_dependencies(self, config: CheriConfig) -> "list[Target]":
         # Due to cyclic imports + forward declarations we need to silence a bad-return-type error here
@@ -90,33 +109,31 @@ class Target(object):
     def check_system_deps(self, config: CheriConfig) -> None:
         if self._completed:
             return
-        project = self.get_or_create_project(None, config)
+        # check_system_deps should be called before setup()
+        project = self._get_or_create_project_no_setup(None, config, None)
         with set_env(PATH=config.dollar_path_with_other_tools, config=config):
             # make sure all system dependencies exist first
             project.check_system_dependencies()
 
+    @final
     def create_project(self, config: CheriConfig) -> "SimpleProject":
         assert not self._creating_project
         if self.instantiating_targets_should_warn:
             raise RuntimeError(coloured(AnsiColour.magenta, "Instantiating target", self.name, "before run()!"))
         self._creating_project = True
-        return self._create_project(config)
+        result = self._create_project(config)
+        result._init_called = True
+        return result
 
     def _create_project(self, config: CheriConfig) -> "SimpleProject":
-        return self.project_class(config)
+        return self.project_class(config, crosscompile_target=self.xtarget)
 
+    # noinspection PyProtectedMember
     def _do_run(self, config, msg: str, func: "typing.Callable[[SimpleProject], typing.Any]"):
         # instantiate the project and run it
         starttime = time.time()
         with add_error_context(coloured(AnsiColour.yellow, "(in target ", self.name, ")", sep="")):
-            project = self.get_or_create_project(self.project_class.get_crosscompile_target(), config)
-            # noinspection PyProtectedMember
-            if not project._setup_called:
-                project.setup()
-                project.setup_late()
-            # noinspection PyProtectedMember
-            assert project._setup_called, str(self._project_class) + ": forgot to call super().setup()?"
-            assert project._setup_late_called, str(self._project_class) + ": forgot to call super().setup_late()?"
+            project = self.get_or_create_project(self.project_class.get_crosscompile_target(), config, None)
             new_env = {"PATH": project.config.dollar_path_with_other_tools}
             if project.config.clang_colour_diags:
                 new_env["CLANG_FORCE_COLOR_DIAGNOSTICS"] = "always"
@@ -217,7 +234,7 @@ class MultiArchTarget(Target):
         return self.target_arch
 
     def _create_project(self, config: CheriConfig) -> "SimpleProject":
-        return self.project_class(config)
+        return self.project_class(config, crosscompile_target=self.xtarget)
 
     def __repr__(self) -> str:
         return "<Cross target (" + self.target_arch.name + ") " + self.name + ">"
@@ -240,13 +257,17 @@ class _TargetAliasBase(Target):
                         caller: "typing.Union[SimpleProject, str]" = "<unknown>") -> Target:
         raise NotImplementedError()
 
-    def get_or_create_project(self, cross_target: typing.Optional[CrossCompileTarget], config) -> "SimpleProject":
+    def _get_or_create_project_no_setup(self, cross_target: typing.Optional[CrossCompileTarget], config,
+                                        caller: "typing.Optional[AbstractProject]") -> "SimpleProject":
+        if caller is not None:
+            # noinspection PyProtectedMember
+            assert caller._init_called, "Cannot call this inside __init__()"
         tgt = self.get_real_target(cross_target, config)
         # Update the cross target
         # noinspection PyProtectedMember
         cross_target = tgt.project_class._xtarget
         assert cross_target is not None
-        return tgt.get_or_create_project(cross_target, config)
+        return tgt._get_or_create_project_no_setup(cross_target, config, caller)
 
     def execute(self, config) -> None:
         return self.get_real_target(None, config).execute(config)
@@ -261,7 +282,7 @@ class _TargetAliasBase(Target):
         return self.get_real_target(None, config).check_system_deps(config)
 
 
-# This is used for targets like "libcxx", etc and resolves to "libcxx-cheri/libcxx-native/libcxx-mips"
+# This is used for targets like "libcxx", etc. and resolves to "libcxx-cheri/libcxx-native/libcxx-mips"
 # at runtime
 class MultiArchTargetAlias(_TargetAliasBase):
     def __init__(self, name, project_class) -> None:
@@ -499,7 +520,7 @@ class TargetManager(object):
                 else:
                     import difflib
                     errmsg = coloured(AnsiColour.red, "Target", target_name, "does not exist.")
-                    suggestions = difflib.get_close_matches(target_name, self._all_targets)
+                    suggestions = difflib.get_close_matches(target_name, self.target_names(config))
                 if suggestions:
                     errmsg += " Did you mean " + " or ".join(coloured(AnsiColour.blue, s) for s in suggestions) + "?"
                 else:

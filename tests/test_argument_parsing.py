@@ -35,8 +35,10 @@ T = typing.TypeVar("T", bound=SimpleProject)
 
 
 def _get_target_instance(target_name: str, config, cls: typing.Type[T] = SimpleProject) -> T:
-    result = target_manager.get_target_raw(target_name).get_or_create_project(None, config)
+    result = target_manager.get_target_raw(target_name).get_or_create_project(None, config, caller=None)
     assert isinstance(result, cls)
+    # noinspection PyProtectedMember
+    assert result._setup_late_called
     return result
 
 
@@ -50,6 +52,7 @@ def _parse_arguments(args: typing.List[str], *, config_file=Path("/this/does/not
     assert isinstance(args, list)
     assert all(isinstance(arg, str) for arg in args), "Invalid argv " + str(args)
     ConfigLoaderBase._cheri_config._cached_deps = collections.defaultdict(dict)
+    assert isinstance(ConfigLoaderBase._cheri_config, DefaultCheriConfig)
     target_manager.reset()
     ConfigLoaderBase._cheri_config.loader._config_path = config_file
     sys.argv = ["cheribuild.py"] + args
@@ -57,6 +60,7 @@ def _parse_arguments(args: typing.List[str], *, config_file=Path("/this/does/not
     ConfigLoaderBase._cheri_config.loader.is_running_unit_tests = True
     ConfigLoaderBase._cheri_config.loader.unknown_config_option_is_error = not allow_unknown_options
     ConfigLoaderBase._cheri_config.load()
+    ConfigLoaderBase._cheri_config.pretend = True
     # pprint.pprint(vars(ret))
     assert isinstance(ConfigLoaderBase._cheri_config, DefaultCheriConfig)
     return ConfigLoaderBase._cheri_config
@@ -789,7 +793,7 @@ def test_default_build_dir(target: str, args: list, expected: str):
     # Check that the cheribsd build dir is correct
     config = _parse_arguments(args)
     target = target_manager.get_target(target, None, config, caller="test_default_arch")
-    builddir = target.get_or_create_project(None, config).build_dir
+    builddir = target.get_or_create_project(None, config, caller=None).build_dir
     assert isinstance(builddir, Path)
     assert builddir.name == expected
 
@@ -1025,3 +1029,15 @@ def test_relative_paths_in_config():
         assert config.build_root == Path(td, "subdir/build")
         assert config.source_root == Path(td, "some-other-dir")
         assert config.output_root == Path(td, "output")
+
+
+def test_cmake_options():
+    def enable_projects_flag(args: "list[str]"):
+        return next((x for x in args if x.startswith("-DLLVM_ENABLE_PROJECTS")), None)
+
+    config = _parse_arguments(["--skip-configure"])
+    assert enable_projects_flag(_get_target_instance(
+        "llvm-native", config, BuildCheriLLVM).configure_args) == "-DLLVM_ENABLE_PROJECTS=llvm;clang;lld"
+    config = _parse_config_file_and_args(b'{ "llvm/cmake-options": ["-DLLVM_ENABLE_PROJECTS=llvm"] }')
+    assert enable_projects_flag(_get_target_instance(
+        "llvm-native", config, BuildCheriLLVM).configure_args) == "-DLLVM_ENABLE_PROJECTS=llvm"

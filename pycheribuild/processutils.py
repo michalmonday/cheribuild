@@ -54,7 +54,8 @@ from .utils import (ConfigBase, fatal_error, get_global_config, OSInfo, status_u
 __all__ = ["print_command", "get_compiler_info", "CompilerInfo", "popen", "popen_handle_noexec",  # no-combine
            "run_command", "latest_system_clang_tool", "commandline_to_str", "set_env", "extract_version",  # no-combine
            "get_program_version", "check_call_handle_noexec", "get_version_output", "keep_terminal_sane",  # no-combine
-           "run_and_kill_children_on_exit", "ssh_config_parameters", "ssh_host_accessible"]  # no-combine
+           "run_and_kill_children_on_exit", "ssh_config_parameters", "ssh_host_accessible",  # no-combine
+           "DoNotQuoteStr"]  # no-combine
 
 
 def __filter_env(env: "dict[str, str]") -> "dict[str, str]":
@@ -111,7 +112,7 @@ class TtyState:
             self.attrs = termios.tcgetattr(fd)
         except Exception as e:
             # Can happen if sys.stdin/sys.stdout/sys.stderr is not a TTY
-            if self._isatty():
+            if self._is_foreground_tty():
                 warning_message("Failed to query TTY state for", context, "-", e)
             self.attrs = None
         try:
@@ -120,16 +121,24 @@ class TtyState:
             # Can happen if sys.stdin/sys.stdout/sys.stderr is not a real file.  When running tests with pytest, this
             # will raise UnsupportedOperation("redirected stdin is pseudofile, has no fileno()")
             self.flags = None
-            if self._isatty():
+            if self._is_foreground_tty():
                 warning_message("Failed to query TTY flags for", context, "-", e)
 
-    def _isatty(self) -> bool:
+    def _is_foreground_tty(self) -> bool:
         try:
-            return os.isatty(self.fd.fileno())
-        except io.UnsupportedOperation:
+            # We are in the foreground if tcgetpgrp(fd) returns the same value as getpgrp().
+            tty_pgrp = os.tcgetpgrp(self.fd.fileno())
+            process_pgrp = os.getpgrp()
+            return tty_pgrp == process_pgrp and os.isatty(self.fd.fileno())
+        except OSError:
             return False
 
     def _restore_attrs(self) -> None:
+        if not self._is_foreground_tty():
+            # Don't attempt to restore previous TTY state if we are not running in the foreground. This ensures that
+            # we don't unexpectly change the state when running as part of a wrapper script and also ensures that we
+            # don't block indefinitely inside tcdrain(). See https://github.com/CTSRD-CHERI/cheribuild/issues/182.
+            return
         try:
             # Run drain first to ensure that we get the most recent state.
             termios.tcdrain(self.fd)
@@ -442,7 +451,7 @@ def run_command(*args, capture_output=False, capture_error=False, input: "typing
             return CompletedProcess(process.args, retcode, stdout, stderr)
 
 
-class DoNoQuoteStr(str if typing.TYPE_CHECKING else object):
+class DoNotQuoteStr(str if typing.TYPE_CHECKING else object):
     def __init__(self, s: str) -> None:
         self.s = s
 
@@ -451,7 +460,7 @@ class DoNoQuoteStr(str if typing.TYPE_CHECKING else object):
 
 
 def _quote(s) -> str:
-    return str(s) if isinstance(s, DoNoQuoteStr) else shlex.quote(str(s))
+    return str(s) if isinstance(s, DoNotQuoteStr) else shlex.quote(str(s))
 
 
 def commandline_to_str(args: "typing.Iterable[typing.Union[str,Path]]") -> str:

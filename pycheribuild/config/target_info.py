@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional, ClassVar
 
 from .chericonfig import CheriConfig, AArch64FloatSimdOptions, MipsFloatAbi
-from ..utils import cached_property, final, OSInfo, warning_message, status_update, fatal_error, Type_T
+from ..utils import cached_property, final, OSInfo, warning_message, status_update, fatal_error
 from ..filesystemutils import FileSystemUtils
 from ..processutils import get_compiler_info, CompilerInfo
 
@@ -122,19 +122,24 @@ class AutoVarInit(Enum):
 
 class AbstractProject(FileSystemUtils):
     """A base class for (Simple)Project that exposes only the fields/methods needed in target_info."""
-    config: CheriConfig
-    target: str
-    _setup_called: bool
-    _xtarget: "Optional[CrossCompileTarget]" = None
-
-    auto_var_init: AutoVarInit  # Needed for essential_compiler_flags
+    _xtarget: "ClassVar[Optional[CrossCompileTarget]]" = None
     default_architecture: "ClassVar[Optional[CrossCompileTarget]]"
     needs_sysroot: "ClassVar[bool]"
+
+    auto_var_init: AutoVarInit  # Needed for essential_compiler_flags
+    config: CheriConfig
+    crosscompile_target: "CrossCompileTarget"
+    target: str
 
     # Allow overrides for libc++/llvm-test-suite
     custom_c_preprocessor: Optional[Path] = None
     custom_c_compiler: Optional[Path] = None
     custom_cxx_compiler: Optional[Path] = None
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._setup_called = False
+        self._init_called = False
 
     def get_compiler_info(self, compiler: Path) -> CompilerInfo:
         return get_compiler_info(compiler, config=self.config)
@@ -148,19 +153,24 @@ class AbstractProject(FileSystemUtils):
     def warning(*args, **kwargs) -> None:
         warning_message(*args, **kwargs)
 
-    @staticmethod
-    def fatal(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False) -> None:
-        fatal_error(*args, sep=sep, fixit_hint=fixit_hint, fatal_when_pretending=fatal_when_pretending)
+    def fatal(self, *args, sep=" ", fixit_hint=None, fatal_when_pretending=False) -> None:
+        fatal_error(*args, sep=sep, fixit_hint=fixit_hint, fatal_when_pretending=fatal_when_pretending,
+                    pretend=self.config.pretend)
 
     @classmethod
     def get_crosscompile_target(cls) -> "CrossCompileTarget":
         target = cls._xtarget
-        if target is not None:
-            return target
-        # otherwise fall back to the default specified in the class
-        result = cls.default_architecture
-        assert result is not None
-        return result
+        assert target is not None
+        return target
+
+    @classmethod
+    def get_instance(cls: "type[_AnyProject]", caller: "Optional[AbstractProject]",
+                     config: "Optional[CheriConfig]" = None,
+                     cross_target: "Optional[CrossCompileTarget]" = None) -> "_AnyProject":
+        raise NotImplementedError()
+
+
+_AnyProject = typing.TypeVar("_AnyProject", bound=AbstractProject)
 
 
 class TargetInfo(ABC):
@@ -168,7 +178,7 @@ class TargetInfo(ABC):
     # os_prefix defaults to shortname.lower() if not set
     os_prefix: Optional[str] = None
 
-    def __init__(self, target: "CrossCompileTarget", project: AbstractProject):
+    def __init__(self, target: "CrossCompileTarget", project: AbstractProject) -> None:
         self.target = target
         self.project = project
 
@@ -290,12 +300,12 @@ class TargetInfo(ABC):
         return []
 
     @property
-    def additional_shared_library_link_flags(self):
+    def additional_shared_library_link_flags(self) -> "list[str]":
         """Additional linker flags that need to be passed when building an shared library (e.g. custom linker script)"""
         return []
 
     @property
-    def default_libdir(self):
+    def default_libdir(self) -> str:
         return "lib"
 
     @property
@@ -355,14 +365,16 @@ class TargetInfo(ABC):
         return False
 
     @final
-    def get_rootfs_project(self, *, t: "typing.Type[Type_T]", xtarget: "CrossCompileTarget" = None) -> Type_T:
+    def get_rootfs_project(self, *, t: "type[_AnyProject]", caller: AbstractProject,
+                           xtarget: "CrossCompileTarget" = None) -> _AnyProject:
         if xtarget is None:
             xtarget = self.target
-        result = self._get_rootfs_project(xtarget.get_rootfs_target())
-        assert isinstance(result, t)
-        return result
+        xtarget = xtarget.get_rootfs_target()
+        result = self._get_rootfs_class(xtarget)
+        assert issubclass(result, t)
+        return result.get_instance(caller=caller, cross_target=xtarget, config=self.config)
 
-    def _get_rootfs_project(self, xtarget: "CrossCompileTarget") -> "AbstractProject":
+    def _get_rootfs_class(self, xtarget: "CrossCompileTarget") -> "type[AbstractProject]":
         raise LookupError("Should not be called for " + self.project.target)
 
     @classmethod

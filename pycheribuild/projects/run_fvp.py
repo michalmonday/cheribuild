@@ -36,8 +36,8 @@ from subprocess import CompletedProcess
 
 from .disk_image import BuildCheriBSDDiskImage, BuildDiskImageBase, BuildFreeBSDImage
 from .fvp_firmware import BuildMorelloFlashImages, BuildMorelloScpFirmware, BuildMorelloUEFI
-from .simple_project import SimpleProject, ComputedDefaultValue
-from ..config.chericonfig import CheriConfig
+from .simple_project import SimpleProject
+from ..config.chericonfig import CheriConfig, ComputedDefaultValue
 from ..config.compilation_targets import CompilationTargets
 from ..processutils import extract_version, popen
 from ..utils import (AnsiColour, cached_property, classproperty, coloured, fatal_error, find_free_port, OSInfo,
@@ -55,13 +55,13 @@ class InstallMorelloFVP(SimpleProject):
     min_ram_mb = 4900
     warn_ram_mb = 7900
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
         if self.use_docker_container:
-            self.add_required_system_tool("docker", homebrew="homebrew/cask/docker")
-            self.add_required_system_tool("socat", homebrew="socat")
+            self.check_required_system_tool("docker", homebrew="homebrew/cask/docker")
+            self.check_required_system_tool("socat", homebrew="socat")
             if OSInfo.IS_MAC:
-                self.add_required_system_tool("Xquartz", homebrew="homebrew/cask/xquartz")
+                self.check_required_system_tool("Xquartz", homebrew="homebrew/cask/xquartz")
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -443,8 +443,8 @@ class LaunchFVPBase(SimpleProject):
     def supported_architectures(self):
         return self._source_class.supported_architectures
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.fvp_project = None
 
     def setup(self):
