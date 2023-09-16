@@ -70,7 +70,6 @@ from ..processutils import (
     commandline_to_str,
     get_program_version,
     get_version_output,
-    run_command,
     ssh_host_accessible,
 )
 from ..utils import (
@@ -180,7 +179,7 @@ class MakeOptions:
         if self.kind != MakeCommandKind.DefaultMake:
             return False
         # otherwise parse make --version
-        return b"GNU Make" in get_version_output(Path(self.command))
+        return b"GNU Make" in get_version_output(Path(self.command), config=self.__project.config)
 
     @property
     def command(self) -> str:
@@ -535,7 +534,7 @@ class Project(SimpleProject):
     def can_run_binaries_on_remote_morello_board(self) -> bool:
         morello_ssh_hostname = self.config.remote_morello_board
         return morello_ssh_hostname and self.target_info.is_cheribsd() and self.compiling_for_aarch64(
-            include_purecap=True) and ssh_host_accessible(morello_ssh_hostname)
+            include_purecap=True) and ssh_host_accessible(morello_ssh_hostname, config=self.config)
 
     def can_use_lto(self, ccinfo: CompilerInfo) -> bool:
         if ccinfo.compiler == "apple-clang":
@@ -1179,7 +1178,7 @@ class Project(SimpleProject):
             if (
                     self.build_dir / "GNUmakefile").is_file() and self.make_kind != MakeCommandKind.BsdMake and \
                     self.target != "elftoolchain":
-                run_command(self.make_args.command, "distclean", cwd=self.build_dir)
+                self.run_cmd(self.make_args.command, "distclean", cwd=self.build_dir)
             else:
                 assert self.source_dir == self.build_dir
                 self._git_clean_source_dir()
@@ -1443,9 +1442,9 @@ add_custom_target(cheribuild-full VERBATIM USES_TERMINAL COMMAND {command} {targ
                            "-- Compilation will fail!")
                 found_asan_lib = Path("/some/invalid/path/to/lib")
             self.makedirs(expected_path)
-            run_command("cp", "-av", found_asan_lib.parent, expected_path.parent)
+            self.run_cmd("cp", "-av", found_asan_lib.parent, expected_path.parent)
             # For some reason they are 644 so we can't overwrite for the next build unless we chmod first
-            run_command("chmod", "-R", "u+w", expected_path.parent)
+            self.run_cmd("chmod", "-R", "u+w", expected_path.parent)
             if not (expected_path / libname).exists():
                 self.fatal("Cannot find", libname, "library in compiler dir", expected_path,
                            "-- Compilation will fail!")
@@ -1750,6 +1749,7 @@ class _CMakeAndMesonSharedLogic(Project):
 class AutotoolsProject(Project):
     do_not_add_to_targets: bool = True
     _configure_supports_prefix: bool = True
+    _can_use_autogen_sh = True  # Whether autogen.sh can be used to create ./configure
     make_kind: MakeCommandKind = MakeCommandKind.GnuMake
     add_host_target_build_config_options: bool = True
 
@@ -1799,11 +1799,19 @@ class AutotoolsProject(Project):
         if self.extra_configure_flags:
             self.configure_args.extend(self.extra_configure_flags)
         # If there is no ./configure script but ./autogen.sh exists, try running that first
-        if not self.configure_command.exists() and (self.configure_command.parent / "autogen.sh").is_file():
+        if self._can_use_autogen_sh and (self.configure_command.parent / "autogen.sh").is_file():
+            generate_configure = not self.configure_command.exists()
+            # We should also run autogen.sh if configure_command is not tracked by git and --clean is passed
+            if not generate_configure and self.config.clean and isinstance(self.repository, GitRepository):
+                generate_configure = not GitRepository.is_tracked(self, self.source_dir, self.configure_command)
             # We need to pass NOCONFIGURE=1, to avoid invoking the configure script directly plus any environment
             # variables that might affect the autoconf lookup (e.g. ACLOCAL_PATH).
-            self.run_cmd(self.configure_command.parent / "autogen.sh", cwd=self.configure_command.parent,
-                         env={**dict(NOCONFIGURE=1), **self.configure_environment})
+            if generate_configure:
+                self.run_cmd(
+                    self.configure_command.parent / "autogen.sh",
+                    cwd=self.configure_command.parent,
+                    env={**dict(NOCONFIGURE=1), **self.configure_environment},
+                )
         super().configure(**kwargs)
 
     def needs_configure(self) -> bool:

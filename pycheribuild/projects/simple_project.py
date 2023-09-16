@@ -406,8 +406,12 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
                 # not A-for-B-rootfs.
                 for dep_name in cls._xtarget.target_info_cls.base_sysroot_targets(cls._xtarget, config):
                     try:
-                        dep_target = target_manager.get_target(dep_name, arch=expected_build_arch.get_rootfs_target(),
-                                                               config=config, caller=cls.target)
+                        dep_target = target_manager.get_target(
+                            dep_name,
+                            arch_for_unqualified_targets=expected_build_arch.get_rootfs_target(),
+                            config=config,
+                            caller=cls.target,
+                        )
                         dependencies.append(dep_target.name)
                     except KeyError:
                         fatal_error("Could not find sysroot target '", dep_name, "' for ", cls.__name__, sep="",
@@ -416,8 +420,9 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         # Try to resovle the target names to actual targets and potentially add recursive depdencies
         for dep_name in dependencies:
             try:
-                dep_target = target_manager.get_target(dep_name, arch=expected_build_arch, config=config,
-                                                       caller=cls.target)
+                dep_target = target_manager.get_target(
+                    dep_name, arch_for_unqualified_targets=expected_build_arch, config=config, caller=cls.target,
+                )
             except KeyError:
                 fatal_error("Could not find target '", dep_name, "' for ", cls.__name__, sep="",
                             pretend=config.pretend, fatal_when_pretending=True)
@@ -557,7 +562,12 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
                                cross_target: Optional[CrossCompileTarget] = None) -> T:
         if cross_target is None:
             cross_target = caller.crosscompile_target
-        target = target_manager.get_target(cls.target, cross_target, caller.config, caller=caller)
+        target_name = cls.target
+        if cross_target is not None and isinstance(caller, cls):
+            # When called as self.get_* we have to ensure that we use the "generic" target since cls.target includes
+            # the -<arch> suffix and querying the target manager for foo-<arch> with a mismatched target is an error
+            target_name = getattr(cls, "synthetic_base", cls).target
+        target = target_manager.get_target(target_name, required_arch=cross_target, config=caller.config, caller=caller)
         # noinspection PyProtectedMember
         result = target._get_or_create_project_no_setup(cross_target, caller.config, caller=caller)
         assert isinstance(result, SimpleProject)
@@ -571,7 +581,7 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         if caller is not None:
             assert caller._init_called, "Cannot call this inside __init__()"
         root_class = getattr(cls, "synthetic_base", cls)
-        target = target_manager.get_target(root_class.target, cross_target, config, caller=caller)
+        target = target_manager.get_target(root_class.target, required_arch=cross_target, config=config, caller=caller)
         result = target.get_or_create_project(cross_target, config, caller=caller)
         assert isinstance(result, SimpleProject)
         found_target = result.get_crosscompile_target()
@@ -897,7 +907,7 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         if not cheribuild_target:
             return
         # Check that the target actually exists
-        tgt = target_manager.get_target(cheribuild_target, None, config=self.config, caller=self)
+        tgt = target_manager.get_target(cheribuild_target, config=self.config, caller=self)
         # And check that it's a native target:
         if not tgt.project_class.get_crosscompile_target().is_native():
             self.fatal("add_required_*() should use a native cheribuild target and not ", cheribuild_target,
@@ -1046,7 +1056,7 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         :param env the environment to pass to make
         :param stdin defaults to /dev/null, set to None to pass the current stdin.
         """
-        print_command(args, cwd=cwd, env=env)
+        print_command(args, cwd=cwd, env=env, config=self.config)
         # make sure that env is either None or a os.environ with the updated entries entries
         new_env: "Optional[dict[str, str]]" = None
         if env:
@@ -1143,19 +1153,19 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
             return False
         try:
             with file.open("rb") as f:
-                if f.read(4) == b"\x7fELF" and self.should_strip_elf_file_for_tarball(file):
+                if f.read(4) == b"\x7fELF" and self.should_strip_elf_file(file):
                     self.verbose_print("Stripping ELF binary", file)
                     cmd = [self.target_info.strip_tool, file]
                     if output_path:
                         self.makedirs(output_path.parent)
                         cmd += ["-o", output_path]
-                    run_command(cmd, print_verbose_only=print_verbose_only)
+                    self.run_cmd(cmd, print_verbose_only=print_verbose_only)
                     return True
         except OSError as e:
             self.warning("Failed to detect file type for", file, e)
         return False
 
-    def should_strip_elf_file_for_tarball(self, f: Path) -> bool:
+    def should_strip_elf_file(self, f: Path) -> bool:
         if f.suffix == ".o":
             # We musn't strip crt1.o, etc. sice if we do the linker can't find essential symbols such as __start
             # __programe or environ.
@@ -1220,7 +1230,8 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
             if self.query_yes_no("Would you like to " + cheribuild_action + " the dependency (" + cheribuild_target +
                                  ") using cheribuild?", force_result=False if is_jenkins_build() else True):
                 xtarget = cheribuild_xtarget if cheribuild_xtarget is not None else self.crosscompile_target
-                dep_target = target_manager.get_target(cheribuild_target, xtarget, config=self.config, caller=self)
+                dep_target = target_manager.get_target(cheribuild_target, required_arch=xtarget, config=self.config,
+                                                       caller=self)
                 dep_target.check_system_deps(self.config)
                 assert dep_target.get_or_create_project(None, self.config, caller=self).crosscompile_target == xtarget
                 dep_target.execute(self.config)
@@ -1288,9 +1299,9 @@ class SimpleProject(AbstractProject, metaclass=ABCMeta if typing.TYPE_CHECKING e
         # Remove kwargs not supported by print_command
         print_args.pop("capture_output", None)
         print_args.pop("give_tty_control", None)
-        print_command(shell, "-xe" if self.config.verbose else "-e", "-c", script, **print_args)
+        print_command(shell, "-xe" if self.config.verbose else "-e", "-c", script, config=self.config, **print_args)
         kwargs["no_print"] = True
-        return run_command(shell, "-xe" if self.config.verbose else "-e", "-c", script, **kwargs)
+        return run_command(shell, "-xe" if self.config.verbose else "-e", "-c", script, config=self.config, **kwargs)
 
     def ensure_file_exists(self, what, path, fixit_hint=None) -> Path:
         if not path.exists():

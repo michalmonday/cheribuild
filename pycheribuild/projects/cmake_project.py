@@ -37,7 +37,7 @@ from typing import Optional, Sequence
 from .project import MakeCommandKind, Project, _CMakeAndMesonSharedLogic
 from .simple_project import _default_stdout_filter
 from ..config.chericonfig import BuildType
-from ..processutils import commandline_to_str, run_command
+from ..processutils import commandline_to_str
 from ..targets import target_manager
 from ..utils import InstallInstructions, OSInfo, include_local_file
 
@@ -163,13 +163,14 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
                 CMAKE_LINKER=self.target_info.linker)
 
         if self.target_info.additional_executable_link_flags:
-            self.add_cmake_options(
-                CMAKE_REQUIRED_LINK_OPTIONS=commandline_to_str(self.target_info.additional_executable_link_flags))
             # TODO: if this doesn't work we can set CMAKE_TRY_COMPILE_TARGET_TYPE to build a static lib instead
             # https://cmake.org/cmake/help/git-master/variable/CMAKE_TRY_COMPILE_TARGET_TYPE.html
             # XXX: we should have everything set up correctly so this should no longer be needed for FreeBSD
             if self.target_info.is_baremetal():
                 self.add_cmake_options(CMAKE_TRY_COMPILE_TARGET_TYPE="STATIC_LIBRARY")
+            else:
+                self.add_cmake_options(
+                    CMAKE_REQUIRED_LINK_OPTIONS=commandline_to_str(self.target_info.additional_executable_link_flags))
         if self.force_static_linkage:
             self.add_cmake_options(
                 CMAKE_SHARED_LIBRARY_SUFFIX=".a",
@@ -299,7 +300,9 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
                 try:
                     cmake_xtarget = self.crosscompile_target
                     # Use a string here instead of BuildCrossCompiledCMake to avoid a cyclic import.
-                    cmake_target = target_manager.get_target("cmake-crosscompiled", cmake_xtarget, self.config, self)
+                    cmake_target = target_manager.get_target(
+                        "cmake-crosscompiled", required_arch=cmake_xtarget, config=self.config, caller=self,
+                    )
                     cmake_project = cmake_target.project_class.get_instance(self, cross_target=cmake_xtarget)
                     expected_ctest_path = cmake_project.install_dir / "bin/ctest"
                     if not expected_ctest_path.is_file():
@@ -327,12 +330,11 @@ class CMakeProject(_CMakeAndMesonSharedLogic):
                            "Please re-run build the target with --", self.get_config_option_name("build_tests"), sep="")
             self.warning("Do not know how to run tests for", self.target)
 
-    @staticmethod
-    def find_package(name: str) -> bool:
+    def find_package(self, name: str) -> bool:
         try:
             cmd = "cmake --find-package -DCOMPILER_ID=Clang -DLANGUAGE=CXX -DMODE=EXIST -DQUIET=TRUE".split()
             cmd.append("-DNAME=" + name)
-            return run_command(cmd).returncode == 0
+            return self.run_cmd(cmd).returncode == 0
         except subprocess.CalledProcessError:
             return False
 

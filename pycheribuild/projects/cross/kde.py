@@ -49,6 +49,17 @@ from ...config.compilation_targets import CompilationTargets
 from ...utils import OSInfo, is_case_sensitive_dir
 
 
+class KF5GitRepository(GitRepository):
+    def __init__(self, url, *args, **kwargs):
+        super().__init__(url, *args, force_branch=True, default_branch="kf5", **kwargs)
+
+
+# Plasma master branches have started requiring KF6, use the last stable branch
+class KDEPlasmaGitRepository(GitRepository):
+    def __init__(self, url, *args, **kwargs):
+        super().__init__(url, *args, force_branch=True, default_branch="Plasma/5.27", **kwargs)
+
+
 class KDECMakeProject(CrossCompileCMakeProject):
     do_not_add_to_targets = True
     default_install_dir = DefaultInstallDir.KDE_PREFIX
@@ -69,7 +80,7 @@ class KDECMakeProject(CrossCompileCMakeProject):
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
         result = super().dependencies(config)
-        return (*result, "qtbase", "extra-cmake-modules")
+        return (*result, "qtbase", "qttools-native", "extra-cmake-modules")
 
     @property
     def ctest_script_extra_args(self):
@@ -137,12 +148,16 @@ class KDECMakeProject(CrossCompileCMakeProject):
 class BuildExtraCMakeModules(KDECMakeProject):
     target = "extra-cmake-modules"
     dependencies = tuple()
-    repository = GitRepository("https://invent.kde.org/frameworks/extra-cmake-modules.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/extra-cmake-modules.git")
 
 
 class BuildPhonon(KDECMakeProject):
     target = "phonon"
     repository = GitRepository("https://invent.kde.org/libraries/phonon.git")
+
+    def setup(self):
+        super().setup()
+        self.add_cmake_options(PHONON_BUILD_QT6=False, PHONON_BUILD_QT5=True)
 
 
 class BuildLibIntlLite(CrossCompileCMakeProject):
@@ -206,7 +221,7 @@ class BuildPlasmaWaylandProtocols(KDECMakeProject):
 #
 class BuildKWayland(KDECMakeProject):
     target = "kwayland"
-    repository = GitRepository("https://invent.kde.org/frameworks/kwayland.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kwayland.git")
     _uses_wayland_scanner = True
 
     @classmethod
@@ -225,24 +240,26 @@ class BuildKWayland(KDECMakeProject):
 
 class BuildBreezeIcons(KDECMakeProject):
     target = "breeze-icons"
-    repository = GitRepository("https://invent.kde.org/frameworks/breeze-icons.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/breeze-icons.git")
 
 
 class BuildAttica(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/attica.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/attica.git")
 
 
 class BuildKArchive(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/karchive.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/karchive.git")
 
 
 class BuildKCodecs(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kcodecs.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kcodecs.git")
 
 
 class BuildKCoreAddons(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kcoreaddons.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/kcoreaddons.git"])
+    repository = KF5GitRepository(
+        "https://invent.kde.org/frameworks/kcoreaddons.git",
+        old_urls=[b"https://invent.kde.org/arichardson/kcoreaddons.git"],
+    )
 
     def setup(self):
         super().setup()
@@ -354,7 +371,7 @@ exec "/{self.target_info.localbase / "bin/kde-shell-x11"}"
 
 
 class BuildKConfig(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kconfig.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kconfig.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -362,7 +379,7 @@ class BuildKConfig(KDECMakeProject):
 
 
 class BuildKDBusAddons(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kdbusaddons.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kdbusaddons.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -372,7 +389,7 @@ class BuildKDBusAddons(KDECMakeProject):
 
 
 class BuildKGuiAddons(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kguiaddons.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kguiaddons.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -387,12 +404,12 @@ class BuildKGuiAddons(KDECMakeProject):
 
 
 class BuildKItemViews(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kitemviews.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kitemviews.git")
     _has_qt_designer_plugin = True
 
 
 class BuildKItemModels(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kitemmodels.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kitemmodels.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -400,11 +417,14 @@ class BuildKItemModels(KDECMakeProject):
 
 
 class BuildKI18N(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/ki18n.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/ki18n.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
-        return (*super().dependencies(config), "libintl-lite")
+        # GLibc provides the libintl APIs, but for FreeBSD we use the basic libintl-lite library.
+        if not cls.get_crosscompile_target().target_info_cls.is_linux():
+            return (*super().dependencies(config), "libintl-lite")
+        return super().dependencies(config)
 
     def setup(self):
         super().setup()
@@ -414,12 +434,12 @@ class BuildKI18N(KDECMakeProject):
 
 class BuildKWidgetsAddons(KDECMakeProject):
     target = "kwidgetsaddons"
-    repository = GitRepository("https://invent.kde.org/frameworks/kwidgetsaddons.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kwidgetsaddons.git")
     _has_qt_designer_plugin = True
 
 
 class BuildKWindowSystem(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kwindowsystem.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kwindowsystem.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -441,17 +461,17 @@ class BuildLibQREncode(KDECMakeProject):
 class BuildPrison(KDECMakeProject):
     target = "prison"
     dependencies = ("libqrencode",)
-    repository = GitRepository("https://invent.kde.org/frameworks/prison.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/prison.git")
 
 
 class BuildSolid(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/solid.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/solid.git")
     # XXX: https://foss.heptapod.net/bsdutils/bsdisks for the DBus API
     _needs_newer_bison = True
 
 
 class BuildSonnet(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/sonnet.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/sonnet.git")
     # TODO: should probably install a spell checker:
     # -- The following OPTIONAL packages have not been found:
     # * ASPELL, Spell checking support via Aspell, <http://aspell.net/>
@@ -472,34 +492,34 @@ class BuildSonnet(KDECMakeProject):
 
 
 class BuildKAuth(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kauth.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kauth.git")
     dependencies = ("kcoreaddons", "kcoreaddons-native")  # optional: "polkit-qt-1"
 
 
 class BuildKCompletion(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kcompletion.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kcompletion.git")
     dependencies = ("kconfig", "kconfig-native", "kwidgetsaddons")
     _has_qt_designer_plugin = True
 
 
 class BuildKCrash(KDECMakeProject):
     dependencies = ("kcoreaddons", "kcoreaddons-native", "qtx11extras", "kwindowsystem")
-    repository = GitRepository("https://invent.kde.org/frameworks/kcrash.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kcrash.git")
 
 
 class BuildKJobWidgets(KDECMakeProject):
     dependencies = ("kcoreaddons", "kcoreaddons-native", "kwidgetsaddons", "qtx11extras")
-    repository = GitRepository("https://invent.kde.org/frameworks/kjobwidgets.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kjobwidgets.git")
 
 
 # class BuildKDocTools(KDECMakeProject):
 #     dependencies = ("karchive", "ki18n",)
-#     repository = GitRepository("https://invent.kde.org/frameworks/kdoctools.git")
+#     repository = KF5GitRepository("https://invent.kde.org/frameworks/kdoctools.git")
 
 
 class BuildKNotifications(KDECMakeProject):
     # frameworks/knotifications: third-party/libdbusmenu-qt
-    repository = GitRepository("https://invent.kde.org/frameworks/knotifications.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/knotifications.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -512,25 +532,26 @@ class BuildKNotifications(KDECMakeProject):
 
 class BuildKPackage(KDECMakeProject):
     dependencies = ("karchive", "ki18n", "kcoreaddons", "kcoreaddons-native")
-    repository = GitRepository("https://invent.kde.org/frameworks/kpackage.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/kpackage.git"])
+    repository = KF5GitRepository(
+        "https://invent.kde.org/frameworks/kpackage.git", old_urls=[b"https://invent.kde.org/arichardson/kpackage.git"],
+    )
 
 
 class BuildKSyndication(KDECMakeProject):
     dependencies = ("kcodecs",)
-    repository = GitRepository("https://invent.kde.org/frameworks/syndication.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/syndication.git")
 
 
 class BuildKImageFormats(KDECMakeProject):
     target = "kimageformats"
-    repository = GitRepository("https://invent.kde.org/frameworks/kimageformats.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kimageformats.git")
     dependencies = ("karchive",)
 
 
 class BuildKUnitConversion(KDECMakeProject):
     target = "kunitconversion"
     dependencies = ("ki18n", "kconfig")
-    repository = GitRepository("https://invent.kde.org/frameworks/kunitconversion.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kunitconversion.git")
 
 
 #
@@ -538,13 +559,13 @@ class BuildKUnitConversion(KDECMakeProject):
 #
 class BuildKBookmarks(KDECMakeProject):
     dependencies = ("kconfigwidgets", "kcodecs", "kiconthemes", "kxmlgui")
-    repository = GitRepository("https://invent.kde.org/frameworks/kbookmarks.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kbookmarks.git")
 
 
 class BuildKCMUtils(KDECMakeProject):
     dependencies = ("kitemviews", "kconfigwidgets", "kservice", "kxmlgui", "kdeclarative", "kauth",
                     "kcmutils-tools-native")
-    repository = GitRepository("https://invent.kde.org/frameworks/kcmutils.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kcmutils.git")
 
 
 class BuildKCMUtilsTools(KDECMakeProject):
@@ -562,7 +583,7 @@ class BuildKCMUtilsTools(KDECMakeProject):
 class BuildKConfigWidgets(KDECMakeProject):
     dependencies = ("kauth", "kcoreaddons", "kcodecs", "kconfig", "kguiaddons", "ki18n", "kwidgetsaddons",
                     "kconfig-native")
-    repository = GitRepository("https://invent.kde.org/frameworks/kconfigwidgets.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kconfigwidgets.git")
     _has_qt_designer_plugin = True
 
 
@@ -576,7 +597,7 @@ class BuildKConfigWidgets(KDECMakeProject):
 class BuildKNewStuff(KDECMakeProject):
     dependencies = ("attica", "kitemviews", "kiconthemes", "ktextwidgets", "kxmlgui",
                     "solid", "kio", "kbookmarks", "kpackage", "kpackage-native", "ksyndication", "kirigami")
-    repository = GitRepository("https://invent.kde.org/frameworks/knewstuff.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/knewstuff.git")
     _needs_newer_bison = True
 
 
@@ -585,30 +606,30 @@ class BuildKService(KDECMakeProject):
                     "kcoreaddons-native",  # desktoptojson
                     "kconfig-native",  # kconfig_compiler
                     )
-    repository = GitRepository("https://invent.kde.org/frameworks/kservice.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kservice.git")
     _needs_newer_bison = True
 
 
 class BuildKTextWidgets(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/ktextwidgets.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/ktextwidgets.git")
     dependencies = ("sonnet", "kcompletion", "kconfigwidgets", "kwidgetsaddons")
     _has_qt_designer_plugin = True
 
 
 class BuildKParts(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kparts.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kparts.git")
     dependencies = ("kio", "kxmlgui", "ktextwidgets", "knotifications")
     _has_qt_designer_plugin = True
 
 
 class BuildKIconThemes(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kiconthemes.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kiconthemes.git")
     dependencies = ("kconfigwidgets", "kwidgetsaddons", "kitemviews", "karchive", "ki18n", "breeze-icons", "qtsvg")
     _has_qt_designer_plugin = True
 
 
 class BuildKGlobalAccel(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kglobalaccel.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kglobalaccel.git")
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -622,12 +643,12 @@ class BuildKXMLGUI(KDECMakeProject):
     dependencies = ("kitemviews", "kconfig", "kconfig-native", "kglobalaccel",
                     "kconfigwidgets", "ki18n", "kiconthemes",
                     "ktextwidgets", "kwidgetsaddons", "kwindowsystem")
-    repository = GitRepository("https://invent.kde.org/frameworks/kxmlgui.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kxmlgui.git")
     _has_qt_designer_plugin = True
 
 
 class BuildKDeclarative(KDECMakeProject):
-    repository = GitRepository("https://invent.kde.org/frameworks/kdeclarative.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kdeclarative.git")
     dependencies = ("kpackage", "kpackage-native", "kio", "kiconthemes", "knotifications", "qtdeclarative", "kio",
                     "libepoxy")
     _has_qt_designer_plugin = True
@@ -637,19 +658,19 @@ class BuildKInit(KDECMakeProject):
     target = "kinit"
     dependencies = ("kio", "kservice", "kcrash", "kjobwidgets", "solid", "kdbusaddons", "kwindowsystem", "libx11",
                     "libxcb")
-    repository = GitRepository("https://invent.kde.org/frameworks/kinit.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kinit.git")
 
 
 class BuildKNotifyConfig(KDECMakeProject):
     target = "knotifyconfig"
     dependencies = ("kio", "ki18n", "knotifications")
-    repository = GitRepository("https://invent.kde.org/frameworks/knotifyconfig.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/knotifyconfig.git")
 
 
 class BuildKDED(KDECMakeProject):
     target = "kded"
     dependencies = ("kservice", "kcrash", "kdbusaddons")
-    repository = GitRepository("https://invent.kde.org/frameworks/kded.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kded.git")
 
 
 class BuildKIO(KDECMakeProject):
@@ -660,13 +681,13 @@ class BuildKIO(KDECMakeProject):
                     "kxmlgui", "kbookmarks", "kconfig", "kconfig-native", "knotifications", "kded",
                     # optional: "kwallet"
                     )
-    repository = GitRepository("https://invent.kde.org/frameworks/kio.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kio.git")
     _has_qt_designer_plugin = True
 
 
 class BuildKWallet(KDECMakeProject):
     target = "kwallet"
-    repository = GitRepository("https://invent.kde.org/frameworks/kwallet.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kwallet.git")
     dependencies = ("kconfig", "kwindowsystem", "ki18n", "kcoreaddons")
     # For KWalletD: ["kdbusaddons", "kwidgetsaddons", "kservice", "knotifications", "gpgme", "gcrypt"]
 
@@ -717,7 +738,7 @@ class BuildKWallet(KDECMakeProject):
 # frameworks/baloo: frameworks/kio
 class BuildKPeople(KDECMakeProject):
     target = "kpeople"
-    repository = GitRepository("https://invent.kde.org/frameworks/kpeople.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kpeople.git")
     dependencies = ("kcoreaddons", "kcoreaddons-native", "kwidgetsaddons", "ki18n", "kitemviews", "qtdeclarative")
 
 
@@ -725,7 +746,7 @@ class BuildKSyntaxHighlighting(KDECMakeProject):
     # This includes e.g. the thumbnail provider for dolphin
     target = "ksyntaxhighlighting"
     needs_native_build_for_crosscompile = True
-    repository = GitRepository("https://invent.kde.org/frameworks/syntax-highlighting.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/syntax-highlighting.git")
 
     def setup(self):
         super().setup()
@@ -752,15 +773,19 @@ class BuildKioExtras(KDECMakeProject):
 class BuildKFileMetadata(KDECMakeProject):
     # This includes e.g. the thumbnail provider for dolphin
     target = "kfilemetadata"
-    # TODO: depend on poppler for PDF medatadata
     dependencies = ("karchive", "kconfig", "ki18n", "karchive", "poppler")
-    repository = GitRepository("https://invent.kde.org/frameworks/kfilemetadata.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kfilemetadata.git")
+
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
+        if self.target_info.is_linux():
+            self.check_required_pkg_config("libattr", apt="libattr1-dev")
 
 
 class BuildKActivities(KDECMakeProject):
     target = "kactivities"
     dependencies = ("kio", "kwindowsystem", "kcoreaddons", "kconfig")
-    repository = GitRepository("https://invent.kde.org/frameworks/kactivities.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kactivities.git")
 
     def setup(self):
         super().setup()
@@ -770,15 +795,15 @@ class BuildKActivities(KDECMakeProject):
 class BuildKActivitiesStats(KDECMakeProject):
     target = "kactivities-stats"
     dependencies = ("kactivities",)
-    repository = GitRepository("https://invent.kde.org/frameworks/kactivities-stats.git",
-                               force_branch=True, default_branch="master")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kactivities-stats.git")
 
 
 class BuildKirigami(KDECMakeProject):
     target = "kirigami"
     dependencies = ("qtquickcontrols2", "extra-cmake-modules", "qtgraphicaleffects")
-    repository = GitRepository("https://invent.kde.org/frameworks/kirigami.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/kirigami.git"])
+    repository = KF5GitRepository(
+        "https://invent.kde.org/frameworks/kirigami.git", old_urls=[b"https://invent.kde.org/arichardson/kirigami.git"],
+    )
 
 
 class BuildPlasmaFramework(KDECMakeProject):
@@ -786,38 +811,41 @@ class BuildPlasmaFramework(KDECMakeProject):
     dependencies = ("kio", "kconfigwidgets", "kactivities", "kdbusaddons", "kglobalaccel", "kpackage", "kdeclarative",
                     "qtquickcontrols", "qtquickcontrols2", "kxmlgui", "threadweaver", "kirigami", "kwayland",
                     "libglvnd")
-    repository = GitRepository("https://invent.kde.org/frameworks/plasma-framework.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/plasma-framework.git"])
+    repository = KF5GitRepository(
+        "https://invent.kde.org/frameworks/plasma-framework.git",
+        old_urls=[b"https://invent.kde.org/arichardson/plasma-framework.git"],
+    )
 
 
 class BuildKRunner(KDECMakeProject):
     target = "krunner"
     dependencies = ("kio", "solid", "kconfig", "kcompletion", "kservice", "threadweaver", "ki18n", "plasma-framework")
-    repository = GitRepository("https://invent.kde.org/frameworks/krunner.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/krunner.git")
 
 
 class BuildKDecoration(KDECMakeProject):
     target = "kdecoration"
     dependencies = ("kcoreaddons", "ki18n")
-    repository = GitRepository("https://invent.kde.org/plasma/kdecoration.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/kdecoration.git")
 
 
 class BuildKFrameworkIntegration(KDECMakeProject):
     target = "kframeworkintegration"
-    repository = GitRepository("https://invent.kde.org/frameworks/frameworkintegration.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/frameworkintegration.git")
     dependencies = ("knewstuff",)
 
 
 class BuildBreezeStyle(KDECMakeProject):
     target = "breeze"
-    repository = GitRepository("https://invent.kde.org/plasma/breeze.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/breeze.git")
     dependencies = ("kdecoration", "kconfig", "kcoreaddons", "kguiaddons", "kiconthemes", "kconfigwidgets",
                     "kwindowsystem", "kcmutils", "kframeworkintegration")
 
 
 class BuildKIdleTime(KDECMakeProject):
     target = "kidletime"
-    repository = GitRepository("https://invent.kde.org/frameworks/kidletime.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kidletime.git")
+    _uses_wayland_scanner = True
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
@@ -829,42 +857,58 @@ class BuildKIdleTime(KDECMakeProject):
 
 class LayerShellQt(KDECMakeProject):
     target = "layer-shell-qt"
-    repository = GitRepository("https://invent.kde.org/plasma/layer-shell-qt.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/layer-shell-qt.git")
     dependencies = ("qtwayland", "wayland-protocols", "libxkbcommon", "qtdeclarative")
     _uses_wayland_scanner = True
 
 
 class BuildKScreenLocker(KDECMakeProject):
     target = "kscreenlocker"
-    repository = GitRepository("https://invent.kde.org/plasma/kscreenlocker.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/kscreenlocker.git"])
-    dependencies = ("kwindowsystem", "kcmutils", "kxmlgui", "kwindowsystem", "kidletime", "libxcb", "kwayland",
-                    "layer-shell-qt")
+    repository = KDEPlasmaGitRepository(
+        "https://invent.kde.org/plasma/kscreenlocker.git",
+        old_urls=[b"https://invent.kde.org/arichardson/kscreenlocker.git"],
+    )
+    dependencies = (
+        "kwindowsystem",
+        "kcmutils",
+        "kxmlgui",
+        "kwindowsystem",
+        "kidletime",
+        "libxcb",
+        "kwayland",
+        "layer-shell-qt",
+        "libkscreen",
+    )
     _uses_wayland_scanner = True
 
 
 class BuildKDECliTools(KDECMakeProject):
     target = "kde-cli-tools"
-    repository = GitRepository("https://invent.kde.org/plasma/kde-cli-tools.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/kde-cli-tools.git")
     dependencies = ("kconfig", "kiconthemes", "ki18n", "kcmutils", "kio", "kservice", "kwindowsystem",
                     "kactivities")  # optional: "kdesu"
 
 
 class BuildKWin(KDECMakeProject):
     target = "kwin"
-    repository = GitRepository("https://invent.kde.org/plasma/kwin.git",
-                               temporary_url_override="https://invent.kde.org/arichardson/kwin.git",
-                               url_override_reason="Avoid libdrm/libgbm dependency+a few minor fixes")
+    repository = KDEPlasmaGitRepository(
+        "https://invent.kde.org/plasma/kwin.git",
+        temporary_url_override="https://invent.kde.org/arichardson/kwin.git",
+        url_override_reason="Avoid libdrm/libgbm/dbus dependency",
+    )
     _uses_wayland_scanner = True
-    use_mesa = BoolConfigOption("use-mesa", default=True,
-                                help="Add a dependency on Mesa to build the wayland DRM backend")
+    use_mesa = BoolConfigOption(
+        "use-mesa",
+        default=True,
+        help="Add a dependency on Mesa to build the wayland DRM backend",
+    )
 
     @classmethod
     def dependencies(cls, config) -> "tuple[str, ...]":
         result = (*super().dependencies(config), "kdecoration", "qtx11extras", "breeze", "kcmutils", "kscreenlocker",
-                  "plasma-framework", "libinput", "qttools", "libepoxy", "libxcvt", "lcms2")
+                  "plasma-framework", "libinput", "qttools", "libepoxy", "libxcvt", "lcms2", "krunner")
         if cls.use_mesa:
-            result += ("mesa",)
+            result += ("mesa", "libdrm")
         if cls.get_crosscompile_target().target_info_cls.is_freebsd():
             result += ("linux-input-h",)
         return result
@@ -884,28 +928,37 @@ class BuildKWin(KDECMakeProject):
 
 class BuildLibKScreen(KDECMakeProject):
     target = "libkscreen"
-    repository = GitRepository("https://invent.kde.org/plasma/libkscreen.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/libkscreen.git"])
+    repository = KDEPlasmaGitRepository(
+        "https://invent.kde.org/plasma/libkscreen.git",
+        old_urls=[b"https://invent.kde.org/arichardson/libkscreen.git"],
+    )
     dependencies = ("qtx11extras", "kwayland")
     _uses_wayland_scanner = True
 
 
 class BuildLibKSysguard(KDECMakeProject):
     target = "libksysguard"
-    repository = GitRepository("https://invent.kde.org/plasma/libksysguard.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/libksysguard.git")
     dependencies = ("kio",)
+
+    def check_system_dependencies(self) -> None:
+        super().check_system_dependencies()
+        if self.target_info.is_linux():
+            self.check_required_pkg_config("libnl-3.0", apt="libnl-3-dev")
+            self.check_required_pkg_config("libnl-route-3.0", apt="libnl-route-3-dev")
+            self.check_required_system_header("sensors/sensors.h", apt="libsensors-dev")
 
 
 class BuildKQuickCharts(KDECMakeProject):
     # NB: this needs openGL.
     target = "kquickcharts"
-    repository = GitRepository("https://invent.kde.org/frameworks/kquickcharts.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/kquickcharts.git")
     dependencies = ("qtquickcontrols2",)
 
 
 class BuildKActivityManagerD(KDECMakeProject):
     target = "kactivitymanagerd"
-    repository = GitRepository("https://invent.kde.org/plasma/kactivitymanagerd.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/kactivitymanagerd.git")
     dependencies = ("kcrash", "kdbusaddons", "ki18n", "kio", "kxmlgui", "kglobalaccel", "boost")
 
 
@@ -918,7 +971,7 @@ class BuildPlasmaWorkspace(KDECMakeProject):
     # libkworkspace/kworkspace_autogen/timestamp
     _default_cmake_generator_arg = "-GUnix Makefiles"
     _uses_wayland_scanner = True
-    repository = GitRepository(
+    repository = KDEPlasmaGitRepository(
         "https://invent.kde.org/plasma/plasma-workspace.git",
         old_urls=[b"https://invent.kde.org/arichardson/plasma-workspace.git"])
     dependencies = ("xprop", "xsetroot", "plasma-framework", "kwin", "breeze", "kidletime", "kitemmodels", "kcmutils",
@@ -928,25 +981,28 @@ class BuildPlasmaWorkspace(KDECMakeProject):
 
     def setup(self):
         super().setup()
-        # Qalculate is only needed for the calculator runner, skip that for now
-        self.add_cmake_options(CMAKE_DISABLE_FIND_PACKAGE_Qalculate=True)
+        self.add_cmake_options(
+            CMAKE_DISABLE_FIND_PACKAGE_Qalculate=True,
+            WITHOUT_QALCULATE=True,  # Qalculate is only needed for the calculator runner, skip that for now
+            GLIBC_LOCALE_GEN=False,  # avoid PolKit-Qt dependency
+        )
 
 
 class BuildQQC2DesktopStyle(KDECMakeProject):
     target = "qqc2-desktop-style"
-    repository = GitRepository("https://invent.kde.org/frameworks/qqc2-desktop-style.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/qqc2-desktop-style.git")
     dependencies = ("kirigami", "kiconthemes", "kconfigwidgets", "qtx11extras")
 
 
 class BuildQQC2BreezeStyle(KDECMakeProject):
     target = "qqc2-breeze-style"
-    repository = GitRepository("https://invent.kde.org/plasma/qqc2-breeze-style.git")
+    repository = KDEPlasmaGitRepository("https://invent.kde.org/plasma/qqc2-breeze-style.git")
     dependencies = ("kirigami", "kiconthemes", "kconfigwidgets", "qtx11extras", "breeze")
 
 
 class BuildPlasmaDesktop(KDECMakeProject):
     target = "plasma-desktop"
-    repository = GitRepository(
+    repository = KDEPlasmaGitRepository(
         "https://invent.kde.org/plasma/plasma-desktop.git",
         temporary_url_override="https://invent.kde.org/arichardson/plasma-desktop.git",
         url_override_reason="https://invent.kde.org/plasma/plasma-desktop/-/merge_requests/944")
@@ -960,9 +1016,10 @@ class BuildPlasmaDesktop(KDECMakeProject):
 
 class BuildSystemSettings(KDECMakeProject):
     target = "systemsettings"
-    repository = GitRepository("https://invent.kde.org/plasma/systemsettings.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/systemsettings.git"],
-                               default_branch="master", force_branch=True)
+    repository = KDEPlasmaGitRepository(
+        "https://invent.kde.org/plasma/systemsettings.git",
+        old_urls=[b"https://invent.kde.org/arichardson/systemsettings.git"],
+    )
     dependencies = ("plasma-workspace",)
 
 
@@ -1047,7 +1104,7 @@ class BuildOpenJPEG(CrossCompileCMakeProject):
 
 class BuildPoppler(CrossCompileCMakeProject):
     target = "poppler"
-    dependencies = ("freetype2", "fontconfig", "qtbase", "libtiff")
+    dependencies = ("freetype2", "fontconfig", "qtbase", "libtiff", "openjpeg")
     repository = GitRepository("https://gitlab.freedesktop.org/poppler/poppler.git",
                                old_urls=[b"https://gitlab.freedesktop.org/arichardson/poppler.git"])
 
@@ -1074,14 +1131,14 @@ class BuildPoppler(CrossCompileCMakeProject):
 
 class BuildThreadWeaver(KDECMakeProject):
     target = "threadweaver"
-    repository = GitRepository("https://invent.kde.org/frameworks/threadweaver.git",
-                               force_branch=True, default_branch="master")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/threadweaver.git")
 
 
 class BuildKPty(KDECMakeProject):
     target = "kpty"
-    repository = GitRepository("https://invent.kde.org/frameworks/kpty.git",
-                               old_urls=[b"https://invent.kde.org/arichardson/kpty"])
+    repository = KF5GitRepository(
+        "https://invent.kde.org/frameworks/kpty.git", old_urls=[b"https://invent.kde.org/arichardson/kpty"],
+    )
 
     def setup(self):
         super().setup()
@@ -1095,7 +1152,7 @@ class BuildKonsole(KDECMakeProject):
     dependencies = ("extra-cmake-modules", "kbookmarks", "kconfig", "kconfigwidgets", "kcoreaddons", "kcrash",
                     "kglobalaccel", "kguiaddons", "kdbusaddons", "ki18n", "kiconthemes", "kio", "knewstuff",
                     "knotifications", "knotifyconfig", "kparts", "kpty", "kservice", "ktextwidgets", "kwidgetsaddons",
-                    "kwindowsystem", "kxmlgui", "qtbase")
+                    "kwindowsystem", "kxmlgui", "qtbase", "qtmultimedia")
 
 
 # TODO: fails to build due to exiv2 usage of auto_ptr
@@ -1137,7 +1194,7 @@ class BuildOkular(KDECMakeProject):
 
 class BuildKTextEditor(KDECMakeProject):
     target = "ktexteditor"
-    repository = GitRepository("https://invent.kde.org/frameworks/ktexteditor.git")
+    repository = KF5GitRepository("https://invent.kde.org/frameworks/ktexteditor.git")
     dependencies = ("editorconfig-core-c", "extra-cmake-modules", "karchive", "kauth", "kconfig", "kguiaddons", "ki18n",
                     "kio", "kparts", "ksyntaxhighlighting", "ktextwidgets", "sonnet", "qtbase", "qtdeclarative")
 

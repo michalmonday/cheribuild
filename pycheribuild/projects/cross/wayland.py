@@ -51,6 +51,7 @@ class BuildEPollShim(CrossCompileCMakeProject):
             self.add_cmake_options(BUILD_TESTING=False)
             # Set these variables to the CMake results from building natively:
             self.add_cmake_options(ALLOWS_ONESHOT_TIMERS_WITH_TIMEOUT_ZERO=True)
+            self.add_cmake_options(POLLRDHUP_VALUE="0x4000", HAVE_POLLRDHUP=True)
         super().configure()
 
     def install(self, **kwargs):
@@ -217,8 +218,8 @@ global target_list
 set target_list "remote-cheribsd"
 """, overwrite=True)
                 ssh_options = "-o NoHostAuthenticationForLocalhost=yes"
-                ssh_port = ssh_config_parameters(self.config.remote_morello_board).get("port", "22")
-                ssh_user = ssh_config_parameters(self.config.remote_morello_board).get("user", "root")
+                ssh_port = ssh_config_parameters(self.config.remote_morello_board, self.config).get("port", "22")
+                ssh_user = ssh_config_parameters(self.config.remote_morello_board, self.config).get("user", "root")
                 self.write_file(self.build_dir / "remote-cheribsd.exp", contents=f"""
 load_generic_config "unix"
 set_board_info connect ssh

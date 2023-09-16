@@ -48,6 +48,7 @@ from .project import (
     DefaultInstallDir,
     GitRepository,
     MakeCommandKind,
+    Project,
 )
 from .simple_project import SimpleProject
 from ..config.compilation_targets import CompilationTargets
@@ -132,7 +133,7 @@ class FileSystemType(Enum):
 class BuildDiskImageBase(SimpleProject):
     do_not_add_to_targets = True
     disk_image_path: Path = None
-    _source_class: "Optional[type[SimpleProject]]" = None
+    _source_class: "Optional[type[Project]]" = None
     strip_binaries = False  # True by default for minimal disk-image
     is_minimal = False  # To allow building a much smaller image
     disk_image_prefix: str = None
@@ -336,7 +337,7 @@ class BuildDiskImageBase(SimpleProject):
         def path_relative_to_outputroot(xtarget) -> Path:
             if xtarget not in self.supported_architectures:
                 return Path("/target/not/supported")
-            install_dir = self.source_project.get_install_dir(self, cross_target=xtarget)
+            install_dir = self._source_class.get_install_dir(self, cross_target=xtarget)
             try:
                 return install_dir.relative_to(self.config.output_root)
             except ValueError:
@@ -1044,12 +1045,16 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
             # needed by /bin/sh & /bin/csh (if we included the purecap sh/csh)
             "libedit.so.7", "libedit.so.8",
         ]
+        # required, but versions were bumped for OpenSSL 3
+        optional_libs += [
+            # cheribsdbox depends on SSL
+            "libcrypto.so.111", "libcrypto.so.30",
+            "libssl.so.111", "libssl.so.30",
+        ]
         # additional cheribsdbox dependencies (PAM+SSL+BSM)
         # We don't know what ABI cheribsdbox is built for so let's just add the libraries for all ABIs
         required_libs += [
             "libbsm.so.3",
-            "libcrypto.so.111",
-            "libssl.so.111",
             "libpam.so.6",
             "libypclnt.so.4",  # needed by pam_unix.so.6
             # cheribsdbox links these three dynamically since they are needed by other programs too
@@ -1060,7 +1065,7 @@ class BuildMinimalCheriBSDDiskImage(BuildDiskImageBase):
             "libexecinfo.so.1",  # depends on libelf.so
         ]
         # Add the required PAM libraries for su(1)/login(1)
-        for i in ("permit", "rootok", "self", "unix", "nologin", "securetty", "lastlog"):
+        for i in ("permit", "rootok", "self", "unix", "nologin", "securetty", "lastlog", "login_access"):
             required_libs += ["pam_" + i + ".so", "pam_" + i + ".so.6"]
 
         # Libraries to include if they exist

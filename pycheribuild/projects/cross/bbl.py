@@ -27,8 +27,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 #
-
-from typing import Optional
+from typing import Optional, cast
 
 from .cheribsd import ConfigPlatform
 from .crosscompileproject import CompilationTargets, CrossCompileAutotoolsProject
@@ -43,15 +42,19 @@ from ..project import (
     MakeCommandKind,
     Project,
 )
+from ...config.compilation_targets import BaremetalClangTargetInfo
 from ...qemu_utils import QemuOptions
 
 
 class BuildBBLBase(CrossCompileAutotoolsProject):
     do_not_add_to_targets = True
-    repository = GitRepository("https://github.com/CTSRD-CHERI/riscv-pk",
-                               force_branch=True, default_branch="cheri_purecap",
-                               # Compilation fixes for clang and support for CHERI
-                               old_urls=[b"https://github.com/jrtc27/riscv-pk.git"])
+    repository = GitRepository(
+        "https://github.com/CTSRD-CHERI/riscv-pk",
+        force_branch=True,
+        default_branch="cheri_purecap",
+        # Compilation fixes for clang and support for CHERI
+        old_urls=[b"https://github.com/jrtc27/riscv-pk.git"],
+    )
     make_kind = MakeCommandKind.GnuMake
     _always_add_suffixed_targets = True
     is_sdk_target = False
@@ -62,12 +65,18 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
     enable_zero_bss = False
     custom_payload: Optional[str] = None
     mem_start = "0x80000000"
+    supported_architectures = (
+        CompilationTargets.FREESTANDING_RISCV64_PURECAP,
+        CompilationTargets.FREESTANDING_RISCV64,
+        CompilationTargets.FREESTANDING_RISCV32_PURECAP,
+        CompilationTargets.FREESTANDING_RISCV32,
+    )
 
     @classmethod
     def dependencies(cls, config: CheriConfig) -> "tuple[str, ...]":
         result = super().dependencies(config)
         if cls.kernel_class:
-            result += (cls.kernel_class.get_class_for_target(cls.get_crosscompile_target()).target, )
+            result += (cls.kernel_class.get_class_for_target(cls.get_crosscompile_target()).target,)
         return result
 
     def setup(self):
@@ -79,15 +88,12 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
         self.common_warning_flags.append("-Werror=return-type")
         self.common_warning_flags.append("-Wall")
 
-        if self.crosscompile_target.is_hybrid_or_purecap_cheri():
-            # We have to build a purecap if we want to support CHERI
-            self.configure_args.append("--with-abi=l64pc128")
-            # Enable CHERI extensions
-            self.configure_args.append("--with-arch=rv64imafdcxcheri")
-        else:
-            self.configure_args.append("--with-abi=lp64")
-            self.configure_args.append("--with-arch=rv64imafdc")
-
+        tinfo = cast(self.target_info, BaremetalClangTargetInfo)
+        # Assume hardfloat architecture and softfloat ABI
+        self.configure_args.append(
+            "--with-arch=" + tinfo.get_riscv_arch_string(self.crosscompile_target, softfloat=False),
+        )
+        self.configure_args.append("--with-abi=" + tinfo.get_riscv_abi(self.crosscompile_target, softfloat=True))
         self.configure_args.append("--with-mem-start=" + self.mem_start)
 
         if self.build_type == BuildType.DEBUG:
@@ -127,8 +133,12 @@ class BuildBBLBase(CrossCompileAutotoolsProject):
         self.install_file(self.build_dir / "bbl", self.real_install_root_dir / "bbl")
 
     @classmethod
-    def get_installed_kernel_path(cls, caller, config: "Optional[CheriConfig]" = None,
-                                  cross_target: "Optional[CrossCompileTarget]" = None):
+    def get_installed_kernel_path(
+        cls,
+        caller,
+        config: "Optional[CheriConfig]" = None,
+        cross_target: "Optional[CrossCompileTarget]" = None,
+    ):
         return cls.get_instance(caller, config=config, cross_target=cross_target).real_install_root_dir / "bbl"
 
 
@@ -142,7 +152,6 @@ class BuildBBLTestPayload(BuildBBLBase):
     default_directory_basename = "bbl"  # reuse same source dir
     build_dir_suffix = "-test-payload"  # but not the build dir
     cross_install_dir = DefaultInstallDir.DO_NOT_INSTALL
-    supported_architectures = (CompilationTargets.FREESTANDING_RISCV64_PURECAP, CompilationTargets.FREESTANDING_RISCV64)
     custom_payload = "dummy_payload"
 
     def setup(self):
@@ -152,10 +161,16 @@ class BuildBBLTestPayload(BuildBBLBase):
 
     def run_tests(self) -> None:
         options = QemuOptions(self.crosscompile_target)
-        self.run_cmd(options.get_commandline(
-            qemu_command=BuildQEMU.qemu_binary(self), add_network_device=False, bios_args=["-bios", "none"],
-            kernel_file=self.build_dir / "bbl"),
-            give_tty_control=True, cwd="/")
+        self.run_cmd(
+            options.get_commandline(
+                qemu_command=BuildQEMU.qemu_binary(self),
+                add_network_device=False,
+                bios_args=["-bios", "none"],
+                kernel_file=self.build_dir / "bbl",
+            ),
+            give_tty_control=True,
+            cwd="/",
+        )
 
 
 # Build BBL without an embedded payload
@@ -164,9 +179,10 @@ class BuildBBLNoPayload(BuildBBLBase):
     default_directory_basename = "bbl"
     without_payload = True
     cross_install_dir = DefaultInstallDir.CUSTOM_INSTALL_DIR
-    supported_architectures = (CompilationTargets.FREESTANDING_RISCV64_PURECAP, CompilationTargets.FREESTANDING_RISCV64)
-    _default_install_dir_fn = ComputedDefaultValue(function=_bbl_install_dir,
-                                                   as_string="$SDK_ROOT/bbl/riscv{32,64}{,-purecap}")
+    _default_install_dir_fn = ComputedDefaultValue(
+        function=_bbl_install_dir,
+        as_string="$SDK_ROOT/bbl/riscv{32,64}{,-purecap}",
+    )
 
     def install(self):
         super().install()
@@ -175,8 +191,14 @@ class BuildBBLNoPayload(BuildBBLBase):
             # Install into the QEMU firware directory so that `-bios default` works
             qemu_fw_dir = BuildQEMU.get_firmware_dir(self, cross_target=CompilationTargets.NATIVE)
             self.makedirs(qemu_fw_dir)
-            self.run_cmd(self.sdk_bindir / "llvm-objcopy", "-S", "-O", "binary",
-                         self.get_installed_kernel_path(self), qemu_fw_dir / "bbl-riscv64cheri-virt-fw_jump.bin")
+            self.run_cmd(
+                self.sdk_bindir / "llvm-objcopy",
+                "-S",
+                "-O",
+                "binary",
+                self.get_installed_kernel_path(self),
+                qemu_fw_dir / "bbl-riscv64cheri-virt-fw_jump.bin",
+            )
 
 
 class BuildBBLNoPayloadGFE(BuildBBLNoPayload):
@@ -186,5 +208,7 @@ class BuildBBLNoPayloadGFE(BuildBBLNoPayload):
     build_dir_suffix = "-gfe"  # but not the build dir
     enable_zero_bss = True
 
-    _default_install_dir_fn = ComputedDefaultValue(function=_bbl_install_dir,
-                                                   as_string="$SDK_ROOT/bbl-gfe/riscv{32,64}{,-purecap}")
+    _default_install_dir_fn = ComputedDefaultValue(
+        function=_bbl_install_dir,
+        as_string="$SDK_ROOT/bbl-gfe/riscv{32,64}{,-purecap}",
+    )

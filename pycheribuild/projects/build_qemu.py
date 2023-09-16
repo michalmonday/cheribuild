@@ -30,6 +30,7 @@
 import os
 import sys
 import typing
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -125,6 +126,13 @@ class BuildQEMUBase(AutotoolsProject):
     @classmethod
     def qemu_binary_for_target(cls, xtarget: CrossCompileTarget, config: CheriConfig):
         raise NotImplementedError()
+
+    def should_strip_elf_file(self, f: Path) -> bool:
+        with suppress(ValueError):
+            if f.relative_to(self.install_dir / "share"):
+                self.verbose_print("Not stripping firmware binary", f, "since the symbol table may be required!")
+                return False
+        return super().should_strip_elf_file(f)
 
     def check_system_dependencies(self) -> None:
         super().check_system_dependencies()
@@ -395,9 +403,11 @@ class BuildQEMU(BuildQEMUBase):
 
     @classmethod
     def qemu_binary_for_target(cls, xtarget: CrossCompileTarget, config: CheriConfig):
-        if xtarget.is_riscv(include_purecap=True):
-            # Always use the CHERI qemu even for plain riscv:
+        # Always use the CHERI qemu even for plain riscv:
+        if xtarget.is_riscv64(include_purecap=True):
             binary_name = "qemu-system-riscv64cheri"
+        elif xtarget.is_riscv32(include_purecap=True):
+            binary_name = "qemu-system-riscv32cheri"
         elif xtarget.is_mips(include_purecap=True):
             binary_name = "qemu-system-mips64cheri128"
         elif xtarget.is_aarch64(include_purecap=True):

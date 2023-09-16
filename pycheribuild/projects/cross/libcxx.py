@@ -31,6 +31,7 @@ import os
 import platform
 import sys
 import typing
+from contextlib import suppress
 
 from .crosscompileproject import (
     CheriConfig,
@@ -57,78 +58,6 @@ class _CxxRuntimeCMakeProject(CrossCompileCMakeProject):
     @property
     def _rootfs_install_dir_name(self):
         return "c++"
-
-
-class BuildLibunwind(_CxxRuntimeCMakeProject):
-    # TODO: add an option to allow upstream llvm?
-    repository = ReuseOtherProjectDefaultTargetRepository(BuildCheriLLVM, subdirectory="libunwind")
-    supported_architectures = CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_BAREMETAL_AND_HOST_TARGETS
-
-    def configure(self, **kwargs):
-        # TODO: should share some code with libcxx
-        # to find the libcxx lit config files and library:
-        test_compiler_flags = self.commandline_to_str(self.default_compiler_flags)
-        test_linker_flags = self.commandline_to_str(self.default_ldflags)
-
-        cxx_instance = BuildLibCXX.get_instance(self)
-        self.add_cmake_options(LIBUNWIND_LIBCXX_PATH=cxx_instance.source_dir,
-                               # Should use libc++ from sysroot
-                               # LIBUNWIND_LIBCXX_LIBRARY_PATH=BuildLibCXX.get_build_dir(self) / "lib",
-                               LIBUNWIND_LIBCXX_LIBRARY_PATH="",
-                               LIBUNWIND_TEST_LINKER_FLAGS=test_linker_flags,
-                               LIBUNWIND_TEST_COMPILER_FLAGS=test_compiler_flags,
-                               # For the test binaries we link libcxxrt statically
-                               LIBUNWIND_TEST_CXX_ABI_LIB_PATH=BuildLibCXXRT.get_build_dir(self) / "lib/libcxxrt.a",
-                               LIBUNWIND_ENABLE_ASSERTIONS=True,
-                               )
-        # Lit multiprocessing seems broken with python 2.7 on FreeBSD (and python 3 seems faster at least for
-        # libunwind/libcxx)
-        self.add_cmake_options(PYTHON_EXECUTABLE=sys.executable)
-        if self.compiling_for_host():
-            if OSInfo.IS_MAC or OSInfo.is_ubuntu():
-                # Can't link libc++abi on MacOS and libsupc++ statically on Ubuntu
-                self.add_cmake_options(LIBUNWIND_TEST_ENABLE_EXCEPTIONS=False)
-                # Static linking is broken on Ubuntu 16.04
-                self.add_cmake_options(LIBUINWIND_BUILD_STATIC_TEST_BINARIES=False)
-        else:
-            self.add_cmake_options(LIBCXX_ENABLE_SHARED=False,
-                                   LIBUNWIND_ENABLE_STATIC=True,
-                                   LIBUNWIND_ENABLE_SHARED=not self.target_info.must_link_statically)
-            # collect_test_binaries = self.build_dir / "test-output"
-            # executor = self.commandline_to_str([self.source_dir / "../libcxx/utils/copy_files.py",
-            #                                "--output-dir", collect_test_binaries])
-            executor = self.commandline_to_str([self.source_dir / "../libcxx/utils/compile_only.py"])
-            self.add_cmake_options(
-                LLVM_LIT_ARGS="--xunit-xml-output " + os.getenv("WORKSPACE", ".") +
-                              "/libunwind-test-results.xml --max-time 3600 --timeout 120 -s -vv -j1",
-                LIBUNWIND_TARGET_TRIPLE=self.target_info.target_triple, LIBUNWIND_SYSROOT=self.sdk_sysroot)
-
-            target_info = "libcxx.test.target_info.CheriBSDRemoteTI"
-            # add the config options required for running tests:
-            self.add_cmake_options(LIBUNWIND_EXECUTOR=executor, LIBUNWIND_TARGET_INFO=target_info,
-                                   LIBUNWIND_CXX_ABI_LIBNAME="libcxxrt")
-            version_script = self.source_dir / "Version.map.FreeBSD"
-            if not version_script.exists():
-                self.fatal("libunwind version script is missing, please update llvm-project!")
-            self.add_cmake_options(LIBUNWIND_USE_VERSION_SCRIPT=version_script)
-
-        # Do not link against libgcc_s when building the shared library:
-        self.add_cmake_options(LIBUNWIND_USE_COMPILER_RT=True)
-        super().configure(**kwargs)
-
-    def run_tests(self):
-        if self.target_info.is_baremetal():
-            self.info("Baremetal tests not implemented")
-            return
-        if self.compiling_for_host():
-            self.run_make("check-unwind", cwd=self.build_dir)
-        else:
-            # Check that the four tests compile and then attempt to run them:
-            self.run_make("check-unwind", cwd=self.build_dir)
-            self.target_info.run_cheribsd_test_script("run_libunwind_tests.py", "--lit-debug-output",
-                                                      "--ssh-executor-script",
-                                                      self.source_dir / "../libcxx/utils/ssh.py",
-                                                      mount_sysroot=True)
 
 
 class BuildLibCXXRT(_CxxRuntimeCMakeProject):
@@ -411,54 +340,80 @@ class _BuildLlvmRuntimes(CrossCompileCMakeProject):
 
     def setup(self):
         super().setup()
-        lit_args = f"--xunit-xml-output \"{self.build_dir}/test-results.xml\" --max-time 3600 --timeout 120 -s -vv"
+        lit_args = f"--xunit-xml-output \"{self.build_dir}/test-results.xml\" --max-time 3600 --timeout 300 -s -vv"
         external_cxxabi = None
         enabled_runtimes = self.get_enabled_runtimes()
-        if self.target_info.is_freebsd():
+        if self.target_info.is_freebsd() and self.llvm_project is not BuildUpstreamLLVM:
             # When targeting FreeBSD we use libcxxrt instead of the local libc++abi:
-            enabled_runtimes.remove("libcxxabi")
+            with suppress(ValueError):
+                enabled_runtimes.remove("libcxxabi")
             external_cxxabi = "libcxxrt"
-            if self.llvm_project is BuildUpstreamLLVM and self.compiling_for_cheri():
+        if self.llvm_project is BuildUpstreamLLVM and self.compiling_for_cheri():
+            with suppress(ValueError):
                 enabled_runtimes.remove("libunwind")  # CHERI fixes have not been upstreamed.
+        target_test_flags = self.commandline_to_str(self.essential_compiler_and_linker_flags)
 
+        self.add_cmake_options(LLVM_INCLUDE_TESTS=True)  # Ensure that we also build tests
         if "libunwind" in enabled_runtimes:
-            self.add_cmake_options(LIBUNWIND_ENABLE_STATIC=True,
-                                   LIBUNWIND_ENABLE_SHARED=not self.target_info.must_link_statically,
-                                   LIBUNWIND_IS_BAREMETAL=self.target_info.is_baremetal(),
-                                   LIBUNWIND_ENABLE_THREADS=not self.target_info.is_baremetal(),
-                                   LIBUNWIND_USE_FRAME_HEADER_CACHE=not self.target_info.is_baremetal(),
-                                   )
+            self.add_cmake_options(
+                LIBUNWIND_ENABLE_STATIC=True,
+                LIBUNWIND_ENABLE_SHARED=not self.target_info.must_link_statically,
+                LIBUNWIND_IS_BAREMETAL=self.target_info.is_baremetal(),
+                LIBUNWIND_ENABLE_THREADS=not self.target_info.is_baremetal(),
+                LIBUNWIND_USE_FRAME_HEADER_CACHE=not self.target_info.is_baremetal(),
+                LIBUNWIND_TEST_TARGET_FLAGS=target_test_flags,
+                LIBUNWIND_ENABLE_ASSERTIONS=True,
+            )
+            if "libcxxabi" in enabled_runtimes:
+                self.add_cmake_options(LIBUNWIND_CXX_ABI="libcxxabi")
+            if self.compiling_for_host() and (OSInfo.IS_MAC or OSInfo.is_ubuntu()):
+                # Can't link libc++abi on MacOS and libsupc++ statically on Ubuntu
+                self.add_cmake_options(LIBUNWIND_TEST_ENABLE_EXCEPTIONS=False)
+                # Static linking is broken on Ubuntu 16.04
+                self.add_cmake_options(LIBUINWIND_BUILD_STATIC_TEST_BINARIES=False)
             if self.target_info.is_baremetal():
                 # work around error: use of undeclared identifier 'alloca', also stack is small
                 self.add_cmake_options(LIBUNWIND_REMEMBER_HEAP_ALLOC=True)
         if "libcxxabi" in enabled_runtimes:
-            self.add_cmake_options(LIBCXXABI_USE_LLVM_UNWINDER="libunwind" in enabled_runtimes,
-                                   LIBCXXABI_ENABLE_STATIC=True,
-                                   LIBCXXABI_ENABLE_SHARED=not self.target_info.must_link_statically)
+            self.add_cmake_options(
+                LIBCXXABI_USE_LLVM_UNWINDER="libunwind" in enabled_runtimes,
+                LIBCXXABI_ENABLE_STATIC=True,
+                LIBCXXABI_ENABLE_SHARED=not self.target_info.must_link_statically,
+                LIBCXXABI_TEST_TARGET_FLAGS=target_test_flags,
+            )
             if self.target_info.is_baremetal():
                 self.add_cmake_options(LIBCXXABI_ENABLE_THREADS=False,
                                        LIBCXXABI_NON_DEMANGLING_TERMINATE=True,  # reduces code size
                                        LIBCXXABI_BAREMETAL=True)
         if "libcxx" in enabled_runtimes:
-            self.add_cmake_options(LIBCXX_ENABLE_SHARED=not self.target_info.must_link_statically,
-                                   LIBCXX_ENABLE_STATIC=True,
-                                   LIBCXX_INCLUDE_TESTS=True,
-                                   LIBCXX_ENABLE_ASSERTIONS=True,
-                                   LIBCXX_ENABLE_EXCEPTIONS=not self.target_info.is_baremetal(),
-                                   LIBCXX_ENABLE_RTTI=not self.target_info.is_baremetal())
+            self.add_cmake_options(
+                LIBCXX_ENABLE_SHARED=not self.target_info.must_link_statically,
+                LIBCXX_ENABLE_STATIC=True,
+                LIBCXX_INCLUDE_TESTS=True,
+                LIBCXX_ENABLE_EXCEPTIONS=not self.target_info.is_baremetal(),
+                LIBCXX_ENABLE_RTTI=not self.target_info.is_baremetal(),
+                LIBCXX_TEST_TARGET_FLAGS=target_test_flags,
+            )
+            if GitRepository.contains_commit(self, "d1367ca46ee40dd76661e3f551515d77301568c0", src_dir=self.source_dir):
+                self.add_cmake_options(LIBCXX_HARDENING_MODE="hardened")
+            else:
+                self.add_cmake_options(LIBCXX_ENABLE_ASSERTIONS=True)
+
             if external_cxxabi is not None:
                 self.add_cmake_options(LIBCXX_CXX_ABI=external_cxxabi)
+                if not self.compiling_for_host():
+                    self.add_cmake_options(
+                        LIBCXX_CXX_ABI_INCLUDE_PATHS=self.sdk_sysroot / "usr/include/c++/v1/",
+                        LIBCXX_CXX_ABI_LIBRARY_PATH=self.sdk_sysroot / "usr" / self.target_info.default_libdir,
+                    )
                 # LIBCXX_ENABLE_ABI_LINKER_SCRIPT is needed if we use libcxxrt/system libc++abi in the tests
-                self.add_cmake_options(LIBCXX_ENABLE_STATIC_ABI_LIBRARY=False, LIBCXX_ENABLE_ABI_LINKER_SCRIPT=True)
+                self.add_cmake_options(LIBCXX_ENABLE_STATIC_ABI_LIBRARY=False)
             else:
                 # When using the locally-built libc++abi, we link the ABI library objects as part of libc++.so
                 assert "libcxxabi" in enabled_runtimes, enabled_runtimes
-                if self.llvm_project is BuildUpstreamLLVM:
-                    self.add_cmake_options(LIBCXX_ENABLE_STATIC_ABI_LIBRARY=True, LIBCXX_ENABLE_ABI_LINKER_SCRIPT=False)
-                else:
-                    # CHERI LLVM is not quite ready for LIBCXX_ENABLE_STATIC_ABI_LIBRARY, this requires upstream
-                    # CMake changes that landed for LLVM 15.
-                    self.add_cmake_options(LIBCXX_ENABLE_STATIC_ABI_LIBRARY=False, LIBCXX_ENABLE_ABI_LINKER_SCRIPT=True)
+                self.add_cmake_options(LIBCXX_CXX_ABI="libcxxabi")
+                self.add_cmake_options(LIBCXX_ENABLE_STATIC_ABI_LIBRARY=False)
+            self.add_cmake_options(LIBCXX_ENABLE_ABI_LINKER_SCRIPT=not self.target_info.must_link_statically)
             if self.target_info.is_baremetal():
                 self.add_cmake_options(LIBCXX_ENABLE_THREADS=False,
                                        LIBCXX_ENABLE_PARALLEL_ALGORITHMS=False,
@@ -479,14 +434,27 @@ class _BuildLlvmRuntimes(CrossCompileCMakeProject):
             self.add_cmake_options(UNIX=1)
             self.COMMON_FLAGS.append("-D_GNU_SOURCE=1")  # strtoll_l is guarded by __GNU_VISIBLE
 
-        if self.test_localhost_via_ssh:
+        test_executor = None
+        if not self.compiling_for_host():
+            if self._have_compile_only_executor():
+                # The compile_only executor does not exist for upstream (yet)
+                test_executor = self.commandline_to_str([self.source_dir / "../libcxx/utils/compile_only.py"])
+        elif self.test_localhost_via_ssh:
             ssh_host = self.config.get_user_name() + "@" + platform.node()
-            self.add_cmake_options(LIBCXX_EXECUTOR=self.commandline_to_str(
-                [self.source_dir / "../libcxx/utils/ssh.py", "--host", ssh_host]))
-
+            test_executor = self.commandline_to_str([self.source_dir / "../libcxx/utils/ssh.py", "--host", ssh_host])
+        if test_executor:
+            self.set_cmake_flag_for_each_runtime(EXECUTOR=test_executor)
         # The cheribuild default RPATH settings break the linker script (but should also be unnecessary without it).
         self.add_cmake_options(CMAKE_INSTALL_RPATH_USE_LINK_PATH=False, CMAKE_BUILD_RPATH_USE_ORIGIN=False,
                                CMAKE_INSTALL_RPATH="", _replace=True)
+
+    def _have_compile_only_executor(self):
+        # The compile_only executor does not exist upstream (yet).
+        return self.llvm_project is BuildCheriLLVM
+
+    def set_cmake_flag_for_each_runtime(self, **kwargs):
+        flags = {f"{x.upper()}_{k}": v for x in self.get_enabled_runtimes() for k, v in kwargs.items()}
+        self.add_cmake_options(**flags)
 
     @classmethod
     def setup_config_options(cls, **kwargs):
@@ -496,18 +464,38 @@ class _BuildLlvmRuntimes(CrossCompileCMakeProject):
                                                               "it works correctly)")
 
     def run_tests(self):
-        if self.compiling_for_host() or self.target_info.is_baremetal():
-            # Without setting LC_ALL lit attempts to encode some things as ASCII and fails.
-            # This only happens on FreeBSD, but we might as well set it everywhere
+        # Without setting LC_ALL lit attempts to encode some things as ASCII and fails.
+        # This only happens on FreeBSD, but we might as well set it everywhere
+        if self.compiling_for_host() or self._have_compile_only_executor():
             with self.set_env(LC_ALL="en_US.UTF-8", FILECHECK_DUMP_INPUT_ON_FAILURE=1):
                 self.run_cmd("cmake", "--build", self.build_dir, "--target", "check-runtimes")
-                return
-        elif self.can_run_binaries_on_remote_morello_board():
-            executor = [self.source_dir / "utils/ssh.py", "--host", self.config.remote_morello_board]
-            # The Morello board has 4 CPUs, so run 4 tests in parallel.
-            self.run_cmd([sys.executable, self.build_dir / "bin/llvm-lit", "-j4", "-vv",
-                          f"--xunit-xml-output={self.build_dir / 'test-results.xml'}",
-                          "-Dexecutor=" + self.commandline_to_str(executor), "test"], cwd=self.build_dir)
+
+        if self.target_info.is_cheribsd() and not self.compiling_for_host():
+            if self.can_run_binaries_on_remote_morello_board():
+                executor = [self.source_dir / "utils/ssh.py", "--host", self.config.remote_morello_board]
+                # The Morello board has 4 CPUs, so run 4 tests in parallel.
+                self.run_cmd(
+                    [
+                        sys.executable,
+                        self.build_dir / "bin/llvm-lit",
+                        "-j4",
+                        "-vv",
+                        f"--xunit-xml-output={self.build_dir / 'test-results.xml'}",
+                        "-Dexecutor=" + self.commandline_to_str(executor),
+                        "--param",
+                        "executor=" + self.commandline_to_str(executor),
+                        *[f"runtimes/{d}" for d in self.get_enabled_runtimes()],
+                    ],
+                    cwd=self.build_dir,
+                )
+            if "libunwind" in self.get_enabled_runtimes():
+                self.target_info.run_cheribsd_test_script(
+                    "run_libunwind_tests.py",
+                    "--lit-debug-output",
+                    "--ssh-executor-script",
+                    self.source_dir / "../libcxx/utils/ssh.py",
+                    mount_sysroot=True,
+                )
 
 
 class BuildLlvmLibs(_BuildLlvmRuntimes):
@@ -517,6 +505,15 @@ class BuildLlvmLibs(_BuildLlvmRuntimes):
         CompilationTargets.ALL_PICOLIBC_TARGETS
     default_architecture = CompilationTargets.NATIVE
     default_build_type = BuildType.DEBUG
+
+
+class BuildLibunwind(_BuildLlvmRuntimes):
+    target = "libunwind"
+    llvm_project = BuildCheriLLVM
+    supported_architectures = CompilationTargets.ALL_SUPPORTED_CHERIBSD_AND_BAREMETAL_AND_HOST_TARGETS
+    default_architecture = CompilationTargets.NATIVE
+    default_build_type = BuildType.DEBUG
+    _enabled_runtimes: "typing.ClassVar[tuple[str, ...]]" = ("libunwind",)
 
 
 class BuildUpstreamLlvmLibs(_BuildLlvmRuntimes):

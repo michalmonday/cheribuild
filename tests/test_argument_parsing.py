@@ -188,7 +188,7 @@ def test_target_subsets(args: "list[str]", expected):
         ),
         pytest.param(
             ["--include-dependencies", "--skip-sdk", "--skip-dependency-filter=qtbase.*", "kcoreaddons-amd64"],
-            ["extra-cmake-modules-amd64", "kcoreaddons-amd64"],
+            ["qttools-native", "extra-cmake-modules-amd64", "kcoreaddons-amd64"],
             id="kcoreaddons-amd64-without-qtbase",
         ),
         pytest.param(
@@ -223,10 +223,11 @@ def test_target_subsets(args: "list[str]", expected):
                 "libpciaccess-amd64",
                 "libdrm-amd64",
                 "qtbase-amd64",
-                "extra-cmake-modules-amd64",
-                "kcoreaddons-amd64",
                 "sqlite-native",
                 "qtbase-native",
+                "qttools-native",
+                "extra-cmake-modules-amd64",
+                "kcoreaddons-amd64",
                 "extra-cmake-modules-native",
                 "kcoreaddons-native",
                 "kauth-amd64",
@@ -332,7 +333,6 @@ def test_per_project_override():
         pytest.param("run", None),
         pytest.param("freebsd", None),
         pytest.param("disk-image-freebsd", None),
-        pytest.param("disk-image-freebsd", None),
         pytest.param("qtbase", None),
         pytest.param("libcxx", None),
     ],
@@ -352,8 +352,7 @@ def test_target_aliases_default_target(target_name, resolved_target):
         assert isinstance(raw_target, MultiArchTargetAlias) or raw_target.name == resolved_target
         target = target_manager.get_target(
             target_name,
-            None,
-            _parse_arguments([]),
+            config=_parse_arguments([]),
             caller="test_target_aliases_default_target",
         )
         assert target.name == resolved_target
@@ -680,18 +679,18 @@ def test_libcxxrt_dependency_path():
         pytest.fail(f"Should have found -DLIBUNWIND_PATH= in {tgt.configure_args}")
 
     config = _parse_arguments(["--skip-configure"])
-    check_libunwind_path(config.build_root / "libunwind-native-build/test-install-prefix/lib", "libcxxrt-native")
     check_libunwind_path(
-        config.output_root / "rootfs-riscv64-purecap/opt/riscv64-purecap/c++/lib",
+        config.build_root / "libunwind-native-build/test-install-prefix/lib",
+        "libcxxrt-native",
+    )
+    check_libunwind_path(
+        config.build_root / "libunwind-riscv64-purecap-build/test-install-prefix/lib",
         "libcxxrt-riscv64-purecap",
     )
-    check_libunwind_path(config.output_root / "rootfs-riscv64/opt/riscv64/c++/lib", "libcxxrt-riscv64")
-    # Check the defaults:
-    config = _parse_arguments(["--skip-configure"])
-    check_libunwind_path(config.build_root / "libunwind-native-build/test-install-prefix/lib", "libcxxrt-native")
-    config = _parse_arguments(["--skip-configure"])
-    check_libunwind_path(config.output_root / "rootfs-riscv64/opt/riscv64/c++/lib", "libcxxrt-riscv64")
-    check_libunwind_path(config.output_root / "rootfs-riscv64/opt/riscv64/c++/lib", "libcxxrt-riscv64")
+    check_libunwind_path(
+        config.build_root / "libunwind-riscv64-build/test-install-prefix/lib",
+        "libcxxrt-riscv64",
+    )
 
 
 class SystemClangIfExistsElse:
@@ -1003,7 +1002,7 @@ def test_freebsd_toolchains_cheribsd_purecap():
 def test_default_build_dir(target: str, args: list, expected: str):
     # Check that the cheribsd build dir is correct
     config = _parse_arguments(args)
-    target = target_manager.get_target(target, None, config, caller="test_default_arch")
+    target = target_manager.get_target(target, config=config, caller="test_default_arch")
     builddir = target.get_or_create_project(None, config, caller=None).build_dir
     assert isinstance(builddir, Path)
     assert builddir.name == expected
@@ -1424,3 +1423,21 @@ def test_jenkins_hack_install_dirs(target: str, args: "list[str]", expected_inst
     jenkins_override_install_dirs_hack(config, Path("/prefix"))
     release = _get_target_instance(target, config, Project)
     assert release.install_dir == expected_install_dir
+
+
+def test_host_prefixes_and_install_dir():
+    # Building the wayland target was failing because it was trying to find wayland-scanner
+    # inside the morello-purecap rootfs.
+    # This was caused by an incorrect result being returned from self.get_install_dir()
+    config = _parse_arguments(["--output-root=/output"])
+    wayland = _get_target_instance("wayland-morello-purecap", config, Project)
+    assert "wayland-native" in wayland.all_dependency_names(config)
+    assert wayland.install_dir == Path("/output/rootfs-morello-purecap/usr/local/morello-purecap")
+    assert wayland.get_instance(wayland).target == "wayland-morello-purecap"
+    assert wayland.get_instance(wayland, cross_target=CompilationTargets.NATIVE).target == "wayland-native"
+    assert wayland.get_install_dir(wayland) == Path("/output/rootfs-morello-purecap/usr/local/morello-purecap")
+    assert wayland.get_install_dir(wayland, cross_target=CompilationTargets.NATIVE) == Path("/output/local")
+    assert wayland.host_dependency_prefixes == [
+        Path("/output/local"),
+        Path("/output/bootstrap"),
+    ]
