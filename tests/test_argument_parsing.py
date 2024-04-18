@@ -16,7 +16,7 @@ import pytest
 # We can't do from pycheribuild.configloader import ConfigLoader here because that will only update the local copy
 from pycheribuild.config.compilation_targets import CompilationTargets, FreeBSDTargetInfo
 from pycheribuild.config.defaultconfig import DefaultCheriConfig
-from pycheribuild.config.loader import ConfigLoaderBase, ConfigOptionBase, JsonAndCommandLineConfigOption
+from pycheribuild.config.loader import ConfigLoaderBase, ConfigOptionHandle, JsonAndCommandLineConfigOption
 from pycheribuild.jenkins_utils import jenkins_override_install_dirs_hack
 
 # noinspection PyUnresolvedReferences
@@ -26,7 +26,7 @@ from pycheribuild.projects.cross.cheribsd import (
     BuildCHERIBSD,
     BuildCheriBsdMfsKernel,
     BuildFreeBSD,
-    FreeBSDToolchainKind,
+    CompilerType,
 )
 from pycheribuild.projects.cross.llvm import BuildCheriLLVM
 from pycheribuild.projects.cross.qt5 import BuildQtBase
@@ -96,7 +96,8 @@ def test_skip_update():
     # default is false:
     conf = _parse_arguments(["--skip-configure"])
     skip = inspect.getattr_static(conf, "skip_update")
-    assert isinstance(skip, JsonAndCommandLineConfigOption)
+    assert isinstance(skip, ConfigOptionHandle)
+    assert isinstance(skip._get_option(), JsonAndCommandLineConfigOption)
     assert not _parse_arguments(["--skip-configure"]).skip_update
     # check that --no-foo and --foo work:
     assert _parse_arguments(["--skip-update"]).skip_update
@@ -126,6 +127,7 @@ def test_skip_update():
                 "llvm-native",
                 "cheribsd-riscv64-purecap",
                 "gmp-riscv64-hybrid-for-purecap-rootfs",
+                "mpfr-riscv64-hybrid-for-purecap-rootfs",
                 "gdb-riscv64-hybrid-for-purecap-rootfs",
                 "bbl-baremetal-riscv64-purecap",
                 "disk-image-riscv64-purecap",
@@ -534,7 +536,8 @@ def test_kernconf():
     assert config.freebsd_kernconf == "LINT"
     attr = inspect.getattr_static(freebsd_riscv, "kernel_config")
     # previously we would replace the command line attribute with a string -> check this is no longer true
-    assert isinstance(attr, JsonAndCommandLineConfigOption)
+    assert isinstance(attr, ConfigOptionHandle)
+    assert isinstance(attr._get_option(), JsonAndCommandLineConfigOption)
     assert freebsd_riscv.kernel_config == "FOO"
     assert cheribsd_riscv_hybrid.kernel_config == "LINT"
     assert freebsd_native.kernel_config == "LINT"
@@ -705,37 +708,37 @@ class SystemClangIfExistsElse:
         pytest.param(
             "freebsd-riscv64",
             SystemClangIfExistsElse("$OUTPUT$/upstream-llvm/bin/clang"),
-            FreeBSDToolchainKind.DEFAULT_COMPILER,
+            CompilerType.DEFAULT_COMPILER,
             [],
         ),
-        pytest.param("freebsd-riscv64", "$OUTPUT$/upstream-llvm/bin/clang", FreeBSDToolchainKind.UPSTREAM_LLVM, []),
-        pytest.param("freebsd-riscv64", "$OUTPUT$/sdk/bin/clang", FreeBSDToolchainKind.CHERI_LLVM, []),
+        pytest.param("freebsd-riscv64", "$OUTPUT$/upstream-llvm/bin/clang", CompilerType.UPSTREAM_LLVM, []),
+        pytest.param("freebsd-riscv64", "$OUTPUT$/sdk/bin/clang", CompilerType.CHERI_LLVM, []),
         pytest.param(
             "freebsd-riscv64",
             "$BUILD$/freebsd-riscv64-build/tmp/usr/bin/clang",
-            FreeBSDToolchainKind.BOOTSTRAPPED,
+            CompilerType.BOOTSTRAPPED,
             [],
         ),
         pytest.param(
             "freebsd-riscv64",
             "/path/to/custom/toolchain/bin/clang",
-            FreeBSDToolchainKind.CUSTOM,
+            CompilerType.CUSTOM,
             ["--freebsd-riscv64/toolchain-path", "/path/to/custom/toolchain"],
         ),
         # CheriBSD-mips can be built with all these toolchains (but defaults to CHERI LLVM):
-        pytest.param("cheribsd-riscv64", "$OUTPUT$/sdk/bin/clang", FreeBSDToolchainKind.DEFAULT_COMPILER, []),
-        pytest.param("cheribsd-riscv64", "$OUTPUT$/upstream-llvm/bin/clang", FreeBSDToolchainKind.UPSTREAM_LLVM, []),
-        pytest.param("cheribsd-riscv64", "$OUTPUT$/sdk/bin/clang", FreeBSDToolchainKind.CHERI_LLVM, []),
+        pytest.param("cheribsd-riscv64", "$OUTPUT$/sdk/bin/clang", CompilerType.DEFAULT_COMPILER, []),
+        pytest.param("cheribsd-riscv64", "$OUTPUT$/upstream-llvm/bin/clang", CompilerType.UPSTREAM_LLVM, []),
+        pytest.param("cheribsd-riscv64", "$OUTPUT$/sdk/bin/clang", CompilerType.CHERI_LLVM, []),
         pytest.param(
             "cheribsd-riscv64",
             "$BUILD$/cheribsd-riscv64-build/tmp/usr/bin/clang",
-            FreeBSDToolchainKind.BOOTSTRAPPED,
+            CompilerType.BOOTSTRAPPED,
             [],
         ),
         pytest.param(
             "cheribsd-riscv64",
             "/path/to/custom/toolchain/bin/clang",
-            FreeBSDToolchainKind.CUSTOM,
+            CompilerType.CUSTOM,
             ["--cheribsd-riscv64/toolchain-path", "/path/to/custom/toolchain"],
         ),
     ],
@@ -743,7 +746,7 @@ class SystemClangIfExistsElse:
 def test_freebsd_toolchains(
     target: str,
     expected_path: Union[str, SystemClangIfExistsElse],
-    kind: FreeBSDToolchainKind,
+    kind: CompilerType,
     extra_args: "list[str]",
 ):
     # Avoid querying bmake for the objdir
@@ -757,7 +760,7 @@ def test_freebsd_toolchains(
     expected_path = expected_path.replace("$OUTPUT$", str(config.output_root))
     expected_path = expected_path.replace("$BUILD$", str(config.build_root))
     assert str(project.CC) == str(expected_path)
-    if kind == FreeBSDToolchainKind.BOOTSTRAPPED:
+    if kind == CompilerType.BOOTSTRAPPED:
         kernel_make_args = project.kernel_make_args_for_config(["GENERIC"], None)
         # If we override CC, we have to also override XCC
         for var, default in (("CC", "cc"), ("CPP", "cpp"), ("CXX", "c++")):
@@ -810,37 +813,69 @@ def test_disk_image_path(target, expected_name):
     ("target", "config_options", "expected_kernels"),
     [
         # RISCV kernconf tests
-        pytest.param("cheribsd-riscv64-purecap", ["--cheribsd/no-build-alternate-abi-kernels"], ["CHERI-QEMU"]),
+        pytest.param(
+            "cheribsd-riscv64-purecap",
+            ["--cheribsd/no-build-alternate-abi-kernels"],
+            ["CHERI-QEMU"],
+        ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-fpga-kernels"],
-            ["CHERI-QEMU", "CHERI-PURECAP-QEMU"],
+            [
+                "CHERI-QEMU",
+                "CHERI-PURECAP-QEMU",
+            ],
         ),
-        pytest.param("cheribsd-riscv64-purecap", [], ["CHERI-QEMU", "CHERI-PURECAP-QEMU"]),
+        pytest.param(
+            "cheribsd-riscv64-purecap",
+            [],
+            [
+                "CHERI-QEMU",
+                "CHERI-PURECAP-QEMU"
+            ],
+        ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-alternate-abi-kernels", "--cheribsd/default-kernel-abi", "purecap"],
-            ["CHERI-PURECAP-QEMU", "CHERI-QEMU"],
+            [
+                "CHERI-PURECAP-QEMU",
+                "CHERI-QEMU",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-fett-kernels", "--cheribsd/no-build-alternate-abi-kernels"],
-            ["CHERI-QEMU-FETT", "CHERI-QEMU"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-FETT",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-fett-kernels"],
-            ["CHERI-QEMU-FETT", "CHERI-QEMU", "CHERI-PURECAP-QEMU"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-FETT",
+                "CHERI-PURECAP-QEMU",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-bench-kernels", "--cheribsd/no-build-alternate-abi-kernels"],
-            ["CHERI-QEMU", "CHERI-QEMU-NODEBUG"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-NODEBUG",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-bench-kernels"],
-            ["CHERI-QEMU", "CHERI-QEMU-NODEBUG", "CHERI-PURECAP-QEMU-NODEBUG", "CHERI-PURECAP-QEMU"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-NODEBUG",
+                "CHERI-PURECAP-QEMU",
+                "CHERI-PURECAP-QEMU-NODEBUG",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
@@ -849,12 +884,22 @@ def test_disk_image_path(target, expected_name):
                 "--cheribsd/build-fpga-kernels",
                 "--cheribsd/no-build-alternate-abi-kernels",
             ],
-            ["CHERI-QEMU-FETT", "CHERI-QEMU", "CHERI-FETT"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-FETT",
+                "CHERI-FETT",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
             ["--cheribsd/build-fett-kernels", "--cheribsd/build-fpga-kernels"],
-            ["CHERI-QEMU-FETT", "CHERI-QEMU", "CHERI-PURECAP-QEMU", "CHERI-FETT", "CHERI-PURECAP-FETT"],
+            [
+                "CHERI-QEMU",
+                "CHERI-QEMU-FETT",
+                "CHERI-PURECAP-QEMU",
+                "CHERI-FETT",
+                "CHERI-PURECAP-FETT",
+            ],
         ),
         pytest.param(
             "cheribsd-riscv64-purecap",
@@ -862,9 +907,23 @@ def test_disk_image_path(target, expected_name):
             ["CUSTOM-KERNEL-CONFIG"],
         ),
         # Morello kernconf tests
-        pytest.param("cheribsd-aarch64", [], ["GENERIC"]),
-        pytest.param("cheribsd-morello-purecap", ["--cheribsd/no-build-alternate-abi-kernels"], ["GENERIC-MORELLO"]),
-        pytest.param("cheribsd-morello-purecap", [], ["GENERIC-MORELLO", "GENERIC-MORELLO-PURECAP"]),
+        pytest.param(
+            "cheribsd-aarch64",
+            [],
+            ["GENERIC"]),
+        pytest.param(
+            "cheribsd-morello-purecap",
+            ["--cheribsd/no-build-alternate-abi-kernels"],
+            ["GENERIC-MORELLO"],
+        ),
+        pytest.param(
+            "cheribsd-morello-purecap",
+            [],
+            [
+                "GENERIC-MORELLO",
+                "GENERIC-MORELLO-PURECAP",
+            ],
+        ),
         pytest.param(
             "cheribsd-morello-purecap",
             ["--cheribsd-morello-purecap/kernel-config", "CUSTOM-KERNEL-CONFIG"],
@@ -905,12 +964,20 @@ def test_kernel_configs(target, config_options: "list[str]", expected_kernels: "
                 "--cheribsd-mfs-root-kernel-riscv64-purecap/build-fpga-kernels",
                 "--cheribsd-mfs-root-kernel-riscv64-purecap/no-build-alternate-abi-kernels",
             ],
-            ["CHERI-QEMU-MFS-ROOT", "CHERI-GFE"],
+            [
+                "CHERI-QEMU-MFS-ROOT",
+                "CHERI-GFE",
+            ],
         ),
         pytest.param(
             "cheribsd-mfs-root-kernel-riscv64-purecap",
             ["--cheribsd-mfs-root-kernel-riscv64-purecap/build-fpga-kernels"],
-            ["CHERI-QEMU-MFS-ROOT", "CHERI-PURECAP-QEMU-MFS-ROOT", "CHERI-GFE", "CHERI-PURECAP-GFE"],
+            [
+                "CHERI-QEMU-MFS-ROOT",
+                "CHERI-PURECAP-QEMU-MFS-ROOT",
+                "CHERI-GFE",
+                "CHERI-PURECAP-GFE",
+            ],
         ),
         pytest.param(
             "cheribsd-mfs-root-kernel-riscv64-purecap",
@@ -930,12 +997,16 @@ def test_kernel_configs(target, config_options: "list[str]", expected_kernels: "
             ["GENERIC-MFS-ROOT"],
         ),
         # Another regression test for assert len(configs) != 0, "No matching default kernel configuration"; we were
-        # missing CHERI(-PURECAP)-CAPREVOKE-QEMU-MFS-ROOT
+        # missing CHERI(-PURECAP)-NOCAPREVOKE-QEMU-MFS-ROOT
         pytest.param(
             "cheribsd-mfs-root-kernel-riscv64-purecap",
-            ["--cheribsd/caprevoke-kernel"],
-            ["CHERI-CAPREVOKE-QEMU-MFS-ROOT", "CHERI-QEMU-MFS-ROOT", "CHERI-PURECAP-CAPREVOKE-QEMU-MFS-ROOT",
-             "CHERI-PURECAP-QEMU-MFS-ROOT"],
+            ["--cheribsd/build-nocaprevoke-kernel"],
+            [
+                "CHERI-QEMU-MFS-ROOT",
+                "CHERI-NOCAPREVOKE-QEMU-MFS-ROOT",
+                "CHERI-PURECAP-QEMU-MFS-ROOT",
+                "CHERI-PURECAP-NOCAPREVOKE-QEMU-MFS-ROOT",
+            ],
         ),
     ],
 )
@@ -948,7 +1019,7 @@ def test_mfsroot_kernel_configs(target: str, config_options: "list[str]", expect
 def test_freebsd_toolchains_cheribsd_purecap():
     # Targets that need CHERI don't have the --toolchain option:
     # Argparse should exit with exit code 2
-    for i in FreeBSDToolchainKind:
+    for i in CompilerType:
         for target in (
             "cheribsd-riscv64-hybrid",
             "cheribsd-riscv64-purecap",
@@ -999,7 +1070,7 @@ def test_freebsd_toolchains_cheribsd_purecap():
         pytest.param("sqlite-native", [], "sqlite-native-build"),
     ],
 )
-def test_default_build_dir(target: str, args: list, expected: str):
+def test_default_build_dir(target: str, args: "list[str]", expected: str):
     # Check that the cheribsd build dir is correct
     config = _parse_arguments(args)
     target = target_manager.get_target(target, config=config, caller="test_default_arch")
@@ -1067,7 +1138,7 @@ def test_default_build_dir(target: str, args: list, expected: str):
         pytest.param("freebsd-riscv64", [], "sdk/sysroot-freebsd-riscv64", "freebsd-riscv64"),
     ],
 )
-def test_default_rootfs_and_sysroot_dir(target: str, args: list, expected_sysroot: str, expected_rootfs: str):
+def test_default_rootfs_and_sysroot_dir(target: str, args: "list[str]", expected_sysroot: str, expected_rootfs: str):
     # Check that the cheribsd build dir is correct
     config = _parse_arguments(args)
     project = _get_target_instance(target, config, BuildFreeBSD)
@@ -1154,8 +1225,8 @@ def test_source_dir_option_when_reusing_git_repo():
     )
     assert str(_get_target_instance("llvm-native", config).source_dir) == "/custom/llvm/dir3"
     assert str(_get_target_instance("compiler-rt-native", config).source_dir) == "/custom/compiler-rt/dir3"
-    # compiler-rt-riscv64 uses the default path, since we only changed llvm-native and compiler-rt-native:
-    assert str(_get_target_instance("compiler-rt-riscv64", config).source_dir) == "/foo/llvm-project/compiler-rt"
+    # compiler-rt-riscv64 uses the default path (llvm-native source), since we only changed compiler-rt-native:
+    assert str(_get_target_instance("compiler-rt-riscv64", config).source_dir) == "/custom/llvm/dir3/compiler-rt"
 
     # Check that cheribsd-mfs-root-kernel reused the cheribsd source dir
     assert str(_get_target_instance("cheribsd-mfs-root-kernel-riscv64-purecap", config).source_dir) == "/foo/cheribsd"
@@ -1180,7 +1251,7 @@ def test_mfs_root_kernel_config_options():
     config_options = [
         attr
         for attr in project.__class__.__dict__
-        if isinstance(inspect.getattr_static(project, attr), ConfigOptionBase)
+        if isinstance(inspect.getattr_static(project, attr), ConfigOptionHandle)
     ]
     config_options.sort()
     assert config_options == [
@@ -1193,8 +1264,8 @@ def test_mfs_root_kernel_config_options():
         "build_dir",
         "build_fett_kernels",
         "build_fpga_kernels",
+        "build_nocaprevoke_kernels",
         "build_type",
-        "caprevoke_kernel",
         "debug_kernel",
         "default_kernel_abi",
         "extra_make_args",
@@ -1401,7 +1472,9 @@ def test_jenkins_hack_disk_image():
     config = _parse_arguments(args)
     jenkins_override_install_dirs_hack(config, Path("/rootfs"))
     disk_image = _get_target_instance(
-        "disk-image-aarch64", config, BuildCheriBSDDiskImage,
+        "disk-image-aarch64",
+        config,
+        BuildCheriBSDDiskImage,
     )
     assert disk_image.disk_image_path == Path("/tmp/tarball/cheribsd-aarch64.img")
     assert disk_image.rootfs_dir == Path("/tmp/tarball/rootfs")

@@ -32,14 +32,14 @@ import os
 import shlex
 import sys
 import typing
-from abc import ABC, abstractmethod
+from abc import ABC, ABCMeta, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 from .computed_default_value import ComputedDefaultValue
 from ..utils import ConfigBase, fatal_error, warning_message
 
-T = typing.TypeVar('T')
+T = typing.TypeVar("T")
 
 if typing.TYPE_CHECKING:
     import argparse
@@ -65,7 +65,7 @@ class ConfigLoaderBase(ABC):
     # will be set later...
     _cheri_config: ConfigBase
 
-    options: "typing.ClassVar[dict[str, ConfigOptionBase]]" = {}
+    option_handles: "typing.ClassVar[dict[str, ConfigOptionHandle]]" = {}
     _json: "typing.ClassVar[dict[str, _LoadedConfigValue]]" = {}
     is_completing_arguments: bool = "_ARGCOMPLETE" in os.environ
     is_generating_readme: bool = "_GENERATING_README" in os.environ
@@ -73,8 +73,9 @@ class ConfigLoaderBase(ABC):
 
     # argparse groups used in the command line loader
 
-    def __init__(self, *, option_cls: "type[ConfigOptionBase]",
-                 command_line_only_options_cls: "type[ConfigOptionBase]"):
+    def __init__(
+        self, *, option_cls: "type[ConfigOptionBase]", command_line_only_options_cls: "type[ConfigOptionBase]"
+    ):
         self.__option_cls: "type[ConfigOptionBase]" = option_cls
         self.__command_line_only_options_cls: "type[ConfigOptionBase]" = command_line_only_options_cls
         self.unknown_config_option_is_error = False
@@ -84,7 +85,8 @@ class ConfigLoaderBase(ABC):
         self.dependencies_group = self.add_argument_group("Selecting which dependencies are built")
         self.path_group = self.add_argument_group("Configuration of default paths")
         self.cross_compile_options_group = self.add_argument_group(
-            "Adjust flags used when compiling MIPS/CHERI projects")
+            "Adjust flags used when compiling MIPS/CHERI projects"
+        )
         self.tests_group = self.add_argument_group("Configuration for running tests")
         self.benchmark_group = self.add_argument_group("Configuration for running benchmarks")
         self.run_group = self.add_argument_group("Configuration for launching QEMU (and other simulators)")
@@ -101,53 +103,87 @@ class ConfigLoaderBase(ABC):
 
     def add_commandline_only_bool_option(self, *args, default=False, **kwargs) -> bool:
         assert default is False or kwargs.get("negatable") is True
-        return self.add_option(*args, option_cls=self.__command_line_only_options_cls, default=default,
-                               negatable=kwargs.pop("negatable", False), type=bool, **kwargs)
+        return self.add_option(
+            *args,
+            option_cls=self.__command_line_only_options_cls,
+            default=default,
+            negatable=kwargs.pop("negatable", False),
+            type=bool,
+            **kwargs,
+        )
 
     # noinspection PyShadowingBuiltins
-    def add_option(self, name: str, shortname=None, *, type: "Union[type[T], Callable[[str], T]]" = str,
-                   default: "Union[ComputedDefaultValue[T], Optional[T], Callable[[ConfigBase, typing.Any], T]]" = None,
-                   _owning_class: "Optional[type]" = None, _fallback_names: "Optional[list[str]]" = None,
-                   option_cls: "Optional[type[ConfigOptionBase[T]]]" = None, **kwargs) -> T:
+    def add_option(
+        self,
+        name: str,
+        shortname=None,
+        *,
+        type: "Union[type[T], Callable[[str], T]]" = str,
+        default: "Union[ComputedDefaultValue[T], Optional[T], Callable[[ConfigBase, typing.Any], T]]" = None,
+        _owning_class: "Optional[type]" = None,
+        _fallback_names: "Optional[list[str]]" = None,
+        option_cls: "Optional[type[ConfigOptionBase[T]]]" = None,
+        replaceable=False,
+        fallback_replaceable: "Optional[bool]" = None,
+        **kwargs,
+    ) -> T:
         if option_cls is None:
             option_cls = self.__option_cls
+        if fallback_replaceable is None:
+            fallback_replaceable = replaceable
 
         # If there is a option this one inherits the value from (e.g. cheribsd-riscv64-purecap/foo -> cheribsd/foo),
-        # we register the fallback option when we first encounter a usage.
+        # we register the fallback option when we first encounter a usage or all prior usages are replaceable (e.g.
+        # so that cheribsd-riscv64-purecap/foo creates cheribsd/foo even if cheribsd-riscv64/foo was enumerated first
+        # and only_add_for_targets excluded it).
         if _fallback_names:
             for fallback_name in _fallback_names:
-                fallback_option = self.options.get(fallback_name)
-                if fallback_option is None:
+                fallback_handle = self.option_handles.get(fallback_name)
+                if fallback_handle is None or fallback_handle.replaceable:
                     # Do not assign an owning class or a default value to this implicitly added fallback option.
-                    fallback_option = self.add_option(fallback_name, type=type, option_cls=option_cls)
-        result = option_cls(name, shortname, default, type, _owning_class, _loader=self,
-                            _fallback_names=_fallback_names, **kwargs)
-        assert name not in self.options  # make sure we don't add duplicate options
-        self.options[name] = result
-        # noinspection PyTypeChecker
-        return result  # pytype: disable=bad-return-type
+                    self.add_option(
+                        fallback_name,
+                        type=type,
+                        option_cls=option_cls,
+                        replaceable=fallback_replaceable,
+                        is_fallback=True,
+                    )
+        option = option_cls(
+            name, shortname, default, type, _owning_class, _loader=self, _fallback_names=_fallback_names, **kwargs
+        )
+        if name in self.option_handles:
+            self.option_handles[name]._replace_option(option, replaceable)
+        else:
+            self.option_handles[name] = ConfigOptionHandle(option, replaceable)
+        return typing.cast("T", self.option_handles[name])
 
     def add_bool_option(self, name: str, shortname=None, default=False, **kwargs) -> bool:
         # noinspection PyTypeChecker
         return self.add_option(name, shortname, default=default, type=bool, **kwargs)
 
-    def add_path_option(self, name: str, *,
-                        default: "Union[ComputedDefaultValue[Path], Path, Callable[[ConfigBase, typing.Any], Path]]",
-                        shortname=None, **kwargs) -> Path:
+    def add_path_option(
+        self,
+        name: str,
+        *,
+        default: "Union[ComputedDefaultValue[Path], Path, Callable[[ConfigBase, typing.Any], Path]]",
+        shortname=None,
+        **kwargs,
+    ) -> Path:
         # we have to make sure we resolve this to an absolute path because otherwise steps where CWD is different fail!
         return typing.cast(Path, self.add_option(name, shortname, type=Path, default=default, **kwargs))
 
-    def add_optional_path_option(self, name: str, *, default: "Optional[Path]" = None, shortname=None,
-                                 **kwargs) -> Path:
+    def add_optional_path_option(
+        self, name: str, *, default: "Optional[Path]" = None, shortname=None, **kwargs
+    ) -> Path:
         # we have to make sure we resolve this to an absolute path because otherwise steps where CWD is different fail!
         return self.add_option(name, shortname, type=Path, default=default, **kwargs)
 
     @abstractmethod
-    def load(self) -> None:
-        ...
+    def load(self) -> None: ...
 
     def finalize_options(self, available_targets, **kwargs) -> None:
-        pass
+        for handle in self.option_handles.values():
+            handle._finalize()
 
     def reload(self) -> None:
         """
@@ -157,7 +193,8 @@ class ConfigLoaderBase(ABC):
         self.load()
 
     def reset(self) -> None:
-        for option in self.options.values():
+        for handle in self.option_handles.values():
+            option = handle._get_option()
             option._cached = None
             option._is_default_value = False
 
@@ -169,24 +206,60 @@ class ConfigLoaderBase(ABC):
 
     # noinspection PyUnresolvedReferences,PyProtectedMember
     @abstractmethod
-    def add_argument_group(self, description: str) -> "Optional[argparse._ArgumentGroup]":
-        ...
+    def add_argument_group(self, description: str) -> "Optional[argparse._ArgumentGroup]": ...
 
     # noinspection PyUnresolvedReferences,PyProtectedMember
     @abstractmethod
-    def add_mutually_exclusive_group(self) -> "Optional[argparse._MutuallyExclusiveGroup]":
-        ...
+    def add_mutually_exclusive_group(self) -> "Optional[argparse._MutuallyExclusiveGroup]": ...
 
     @abstractmethod
-    def targets(self) -> "list[str]":
-        ...
+    def targets(self) -> "list[str]": ...
 
 
-class ConfigOptionBase(typing.Generic[T]):
-    def __init__(self, name: str, shortname: Optional[str], default,
-                 value_type: "Union[type[T], Callable[[typing.Any], T]]", _owning_class=None, *,
-                 _loader: "Optional[ConfigLoaderBase]" = None, _fallback_names: "Optional[list[str]]" = None,
-                 _legacy_alias_names: "Optional[list[str]]" = None):
+class AbstractConfigOption(typing.Generic[T], metaclass=ABCMeta):
+    @abstractmethod
+    def load_option(
+        self, config: "ConfigBase", instance: "Optional[object]", _: type, return_none_if_default=False
+    ) -> T: ...
+
+    @abstractmethod
+    def _load_option_impl(self, config: "ConfigBase", target_option_name) -> "Optional[_LoadedConfigValue]": ...
+
+    @abstractmethod
+    def debug_msg(self, *args, **kwargs) -> None: ...
+
+    @property
+    @abstractmethod
+    def full_option_name(self) -> str: ...
+
+    @property
+    @abstractmethod
+    def is_default_value(self) -> bool: ...
+
+    @abstractmethod
+    def __get__(self, instance, owner) -> T: ...
+
+    @abstractmethod
+    def _get_default_value(self, config: "ConfigBase", instance: "Optional[object]" = None) -> _LoadedConfigValue: ...
+
+    @abstractmethod
+    def _convert_type(self, loaded_result: _LoadedConfigValue) -> "Optional[T]": ...
+
+
+class ConfigOptionBase(AbstractConfigOption[T]):
+    def __init__(
+        self,
+        name: str,
+        shortname: Optional[str],
+        default,
+        value_type: "Union[type[T], Callable[[typing.Any], T]]",
+        _owning_class=None,
+        *,
+        _loader: "Optional[ConfigLoaderBase]" = None,
+        _fallback_names: "Optional[list[str]]" = None,
+        _legacy_alias_names: "Optional[list[str]]" = None,
+        is_fallback: bool = False,
+    ):
         self.name = name
         self.shortname = shortname
         self.default = default
@@ -198,13 +271,15 @@ class ConfigOptionBase(typing.Generic[T]):
         if _fallback_names:
             assert _loader is not None
             for name in _fallback_names:
-                assert _loader.options.get(name) is not None or _loader.is_completing_arguments
+                assert _loader.option_handles.get(name) is not None or _loader.is_completing_arguments
         self._fallback_names = _fallback_names  # for targets such as gdb-mips, etc
         self.alias_names = _legacy_alias_names  # for targets such as gdb-mips, etc
         self._is_default_value = False
+        self.is_fallback_only = is_fallback
 
-    def load_option(self, config: "ConfigBase", instance: "Optional[object]", _: type,
-                    return_none_if_default=False) -> T:
+    def load_option(
+        self, config: "ConfigBase", instance: "Optional[object]", _: type, return_none_if_default=False
+    ) -> T:
         result = self._load_option_impl(config, self.full_option_name)
         # fall back from --qtbase-mips/foo to --qtbase/foo
         # Try aliases first:
@@ -217,9 +292,9 @@ class ConfigOptionBase(typing.Generic[T]):
                     break
         if result is None and self._fallback_names is not None:
             for fallback_name in self._fallback_names:
-                fallback_option = self._loader.options.get(fallback_name)
-                assert fallback_option is not None
-                result = fallback_option._load_option_impl(config, fallback_name)
+                fallback_handle = self._loader.option_handles.get(fallback_name)
+                assert fallback_handle is not None
+                result = fallback_handle._load_option_impl(config, fallback_name)
                 if result is not None:
                     self.debug_msg("Using fallback config option value", fallback_name, "for", self.name, "->", result)
                     assert isinstance(result, _LoadedConfigValue)
@@ -236,8 +311,16 @@ class ConfigOptionBase(typing.Generic[T]):
         try:
             result = self._convert_type(result)
         except ValueError as e:
-            fatal_error("Invalid value for option '", self.full_option_name,
-                        "': could not convert '", result, "': ", str(e), sep="", pretend=config.pretend)
+            fatal_error(
+                "Invalid value for option '",
+                self.full_option_name,
+                "': could not convert '",
+                result,
+                "': ",
+                str(e),
+                sep="",
+                pretend=config.pretend,
+            )
             sys.exit()
         return result
 
@@ -258,9 +341,10 @@ class ConfigOptionBase(typing.Generic[T]):
         return self._is_default_value
 
     def __get__(self, instance, owner) -> T:
-        assert instance is not None or not callable(self.default), \
-            f"Tried to access read config option {self.full_option_name} without an object instance. " \
+        assert instance is not None or not callable(self.default), (
+            f"Tried to access read config option {self.full_option_name} without an object instance. "
             f"Config options using computed defaults can only be used with an object instance. Owner = {owner}"
+        )
 
         # TODO: would be nice if this was possible (but too much depends on accessing values without instances)
         # if instance is None:
@@ -284,12 +368,20 @@ class ConfigOptionBase(typing.Generic[T]):
         result = loaded_result.value
         # self.debug_msg("Converting", result, "to", self.value_type)
         # if the requested type is list, tuple, etc. use shlex.split() to convert strings to lists
-        if self.value_type != str and isinstance(result, str):
+        if self.value_type is not str and isinstance(result, str):
             if isinstance(self.value_type, type) and issubclass(self.value_type, collections.abc.Sequence):
                 string_value = result
                 result = shlex.split(string_value)
-                warning_message("Config option ", self.full_option_name, " (", string_value, ") should be a list, ",
-                                "got a string instead -> assuming the correct value is ", result, sep="")
+                warning_message(
+                    "Config option ",
+                    self.full_option_name,
+                    " (",
+                    string_value,
+                    ") should be a list, ",
+                    "got a string instead -> assuming the correct value is ",
+                    result,
+                    sep="",
+                )
         if isinstance(self.value_type, type) and issubclass(self.value_type, Path):
             expanded = os.path.expanduser(os.path.expandvars(str(result)))
             while expanded.startswith("//"):
@@ -319,3 +411,58 @@ class DefaultValueOnlyConfigOption(ConfigOptionBase[T]):
 
     def _load_option_impl(self, config: "ConfigBase", target_option_name):
         return None  # always use the default value
+
+
+class ConfigOptionHandle(AbstractConfigOption[T]):
+    def __init__(self, option: "ConfigOptionBase[T]", replaceable: bool):
+        super().__init__()
+        self.__option = option
+        self.__replaceable = replaceable
+
+    def _finalize(self) -> None:
+        self.__replaceable = False
+
+    def _get_option(self, require_final=True) -> "ConfigOptionBase[T]":
+        if require_final:
+            assert not self.__replaceable, f"Option handle not yet final for {self.full_option_name}"
+        return self.__option
+
+    def _replace_option(self, option: "ConfigOptionBase[T]", replaceable: bool):
+        assert self.__replaceable, f"Cannot replace non-replaceable option {self.full_option_name}"
+        self.__option = option
+        self.__replaceable = replaceable
+
+    @property
+    def replaceable(self) -> bool:
+        return self.__replaceable
+
+    def load_option(
+        self, config: "ConfigBase", instance: "Optional[object]", _: type, return_none_if_default=False
+    ) -> T:
+        return self._get_option().load_option(config, instance, _, return_none_if_default)
+
+    def _load_option_impl(self, config: "ConfigBase", target_option_name) -> "Optional[_LoadedConfigValue]":
+        return self._get_option()._load_option_impl(config, target_option_name)
+
+    def debug_msg(self, *args, **kwargs) -> None:
+        return self._get_option(False).debug_msg(*args, **kwargs)
+
+    @property
+    def full_option_name(self) -> str:
+        return self._get_option(False).full_option_name
+
+    @property
+    def is_default_value(self) -> bool:
+        return self._get_option().is_default_value
+
+    def __get__(self, instance, owner) -> T:
+        return self._get_option().__get__(instance, owner)
+
+    def _get_default_value(self, config: "ConfigBase", instance: "Optional[object]" = None) -> _LoadedConfigValue:
+        return self._get_option()._get_default_value(config, instance)
+
+    def _convert_type(self, loaded_result: _LoadedConfigValue) -> "Optional[T]":
+        return self._get_option()._convert_type(loaded_result)
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__}({self.__option!r} replaceable={self.__replaceable})>"

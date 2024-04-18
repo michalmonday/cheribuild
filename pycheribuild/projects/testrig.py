@@ -121,16 +121,13 @@ class RunTestRIGBase(SimpleProject):
         return self.target
 
     @abstractmethod
-    def get_reference_implementation_command(self, port: int) -> "list[str]":
-        ...
+    def get_reference_implementation_command(self, port: int) -> "list[str]": ...
 
     @abstractmethod
-    def get_test_implementation_command(self, port: int) -> "list[str]":
-        ...
+    def get_test_implementation_command(self, port: int) -> "list[str]": ...
 
     @abstractmethod
-    def _get_vengine_action_args(self, log_dir: Path) -> "list[str]":
-        ...
+    def _get_vengine_action_args(self, log_dir: Path) -> "list[str]": ...
 
     @cached_property
     def run_implementations_with_tracing(self):
@@ -239,7 +236,8 @@ class RunTestRIGFuzz(RunTestRIGBase, ABC):
         super().setup_config_options(**kwargs)
         if getattr(cls, "_replay_trace_path", None) is None:
             cls._replay_trace_path = cls.add_optional_path_option(
-                "replay-trace", help="Run QCV trace from file/directory")
+                "replay-trace", help="Run QCV trace from file/directory"
+            )
 
     @cached_property
     def run_implementations_with_tracing(self) -> bool:

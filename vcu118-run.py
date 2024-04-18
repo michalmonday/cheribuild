@@ -229,8 +229,7 @@ class SerialConnection:
         self.cheribsd.interact()
 
     @abstractmethod
-    def show_help_message(self):
-        ...
+    def show_help_message(self): ...
 
 
 class PicoComConnection(SerialConnection):

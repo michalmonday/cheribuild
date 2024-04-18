@@ -41,7 +41,8 @@ def jenkins_override_install_dirs_hack(cheri_config: CheriConfig, install_prefix
     expected_install_path = Path(f"{cheri_config.output_root}{install_prefix}")
     # Ugly workaround to override all install dirs to go to the tarball
     all_targets = [
-        x for x in target_manager.targets(cheri_config)
+        x
+        for x in target_manager.targets(cheri_config)
         if not isinstance(x, (SimpleTargetAlias, MultiArchTargetAlias)) and issubclass(x.project_class, Project)
     ]
     for target in all_targets:
@@ -54,7 +55,7 @@ def jenkins_override_install_dirs_hack(cheri_config: CheriConfig, install_prefix
         # noinspection PyProtectedMember
         project = target._get_or_create_project_no_setup(None, cheri_config, caller=None)
         assert isinstance(project, Project)
-        i = inspect.getattr_static(project, "_install_dir")
+        i = inspect.getattr_static(project, "_install_dir")._get_option()
         assert isinstance(i, CommandLineConfigOption)
         # But don't change it if it was specified on the command line. Note: This also does the config
         # inheritance: i.e. setting --cheribsd/install-dir will also affect cheribsd-cheri/cheribsd-mips

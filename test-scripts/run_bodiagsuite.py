@@ -73,7 +73,7 @@ class BODiagTestsuite:
     def error(self, *args):
         print(self.test_prefix, "ERROR:", *args, file=sys.stderr)
 
-    def handle_testcase(self, o: Path, tools: list):
+    def handle_testcase(self, o: Path, tools: "list[str]"):
         stem = o.stem
         assert stem.startswith(self.test_prefix), stem
         exit_code_str = o.read_text(encoding="utf-8", errors="replace").rstrip()
@@ -243,7 +243,7 @@ def main():
         add_args(parser)
         parser.add_argument("--test-native", action="store_true")
         parser.add_argument("--build-dir")
-        args, remaining = parser.parse_known_args()
+        args, _ = parser.parse_known_args()
         if args.test_native and not args.junit_xml_only:
             cmd = [args.bmake_path, "-r", "-f", args.build_dir + "/Makefile.bsd-run", "all"]
             if args.jobs > 1:

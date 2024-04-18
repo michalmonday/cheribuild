@@ -12,7 +12,9 @@ except ImportError:
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
-from pycheribuild.mtree import MtreeFile  # noqa: E402
+# The following line triggers a flake8 warning, but ruff is able to ignore the
+# sys.path modification, so silence the ruff warning while we still use flake8.
+from pycheribuild.mtree import MtreeFile  # noqa: E402, RUF100
 
 HAVE_LCHMOD = True
 if "_TEST_SKIP_METALOG" in os.environ:
@@ -205,13 +207,16 @@ def test_contents_root():
 # END
 """
     mtree = MtreeFile(file=io.StringIO(file), contents_root=Path("/path/to/rootfs"), verbose=False)
-    assert _get_as_str(mtree) == """#mtree 2.0
+    assert (
+        _get_as_str(mtree)
+        == """#mtree 2.0
 . type=dir uname=root gname=wheel mode=0755
 ./bin type=dir uname=root gname=wheel mode=0755
 ./bin/cat type=file uname=root gname=wheel mode=0755 contents=/path/to/rootfs/bin/cheribsdbox
 ./bin/cheribsdbox type=file uname=root gname=wheel mode=0755 contents=/path/to/rootfs/bin/cheribsdbox
 # END
 """
+    )
 
 
 def test_add_file():

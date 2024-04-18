@@ -1,7 +1,7 @@
 #
 # SPDX-License-Identifier: BSD-2-Clause
 #
-# Copyright (c) 2021 Jessica Clarke
+# Copyright (c) 2024 John Baldwin
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions are met:
@@ -23,14 +23,17 @@
 # SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-from .crosscompileproject import CrossCompileAutotoolsProject, DefaultInstallDir
-from ..project import GitRepository
+from .crosscompileproject import (
+    CrossCompileAutotoolsProject,
+    DefaultInstallDir,
+    GitRepository,
+)
+from .gmp import BuildGmp
 from ...config.compilation_targets import CompilationTargets
 
 
-class BuildGmp(CrossCompileAutotoolsProject):
-    repository = GitRepository("https://github.com/gmp-mirror/gmp")
-    default_directory_basename = "libgmp"
+class BuildMpfr(CrossCompileAutotoolsProject):
+    repository = GitRepository("https://gitlab.inria.fr/mpfr/mpfr.git")
     supported_architectures = (
         CompilationTargets.ALL_CHERIBSD_TARGETS_WITH_HYBRID
         + CompilationTargets.ALL_CHERIBSD_HYBRID_FOR_PURECAP_ROOTFS_TARGETS
@@ -44,22 +47,14 @@ class BuildGmp(CrossCompileAutotoolsProject):
         # It would be nice if we could just disable building documentation, but until we can do so, missing makeinfo
         # results in failing build
         self.check_required_system_tool("makeinfo", default="texinfo")
+        if self.compiling_for_host():
+            self.check_required_pkg_config("gmp", freebsd="gmp")
 
     def setup(self):
         super().setup()
-        if self.crosscompile_target.is_hybrid_or_purecap_cheri():
-            # configure script has checks that rely on implicit prototypes.
-            # TODO: Fix and upstream
-            self.cross_warning_flags.append("-Wno-error=cheri-prototypes")
-        if self.crosscompile_target.is_cheri_purecap():
-            # Obviously not ported, so just use generic C versions
-            self.configure_args.append("--disable-assembly")
-
-    def configure(self, **kwargs):
-        self.run_cmd("./.bootstrap", cwd=self.source_dir)
-        super().configure(**kwargs)
+        self.configure_args.append("--with-gmp=" + str(BuildGmp.get_install_dir(self)))
 
     def install(self, **kwargs):
         super().install(**kwargs)
         if not self.compiling_for_host():
-            self.delete_file(self.install_dir / "lib/libgmp.la", warn_if_missing=True)
+            self.delete_file(self.install_dir / "lib/libmpfr.la", warn_if_missing=True)

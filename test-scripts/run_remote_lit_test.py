@@ -43,6 +43,9 @@ from typing import Optional
 
 from run_tests_common import boot_cheribsd, commandline_to_str, pexpect
 
+from pycheribuild.ssh_utils import generate_ssh_config_file_for_qemu, ssh_host_accessible_uncached
+from pycheribuild.utils import get_global_config
+
 KERNEL_PANIC = False
 COMPLETED = "COMPLETED"
 NEXT_STAGE = "NEXT_STAGE"
@@ -59,12 +62,12 @@ class MultiprocessStages(Enum):
     TIMED_OUT = "timed out"
 
 
-CURRENT_STAGE: MultiprocessStages = MultiprocessStages.FINDING_SSH_PORT
+CURRENT_STAGE: MultiprocessStages = MultiprocessStages.BOOTING_CHERIBSD
 
 
 def add_common_cmdline_args(parser: argparse.ArgumentParser, default_xunit_output: str, allow_multiprocessing: bool):
     parser.add_argument("--ssh-executor-script", help="Path to the ssh.py executor script", required=True)
-    parser.add_argument("--use-shared-mount-for-tests", action="store_true", default=True)
+    parser.add_argument("--use-shared-mount-for-tests", action="store_true", default=False)
     parser.add_argument("--no-use-shared-mount-for-tests", dest="use-shared-mount-for-tests", action="store_false")
     parser.add_argument("--llvm-lit-path")
     parser.add_argument("--xunit-output", default=default_xunit_output)
@@ -108,14 +111,13 @@ def notify_main_process(
     if mp_q:
         global CURRENT_STAGE  # noqa: PLW0603
         mp_debug(cmdline_args, "Next stage: ", CURRENT_STAGE, "->", stage)
-        mp_q.put((NEXT_STAGE, cmdline_args.internal_shard, stage))
+        mp_q.put((NEXT_STAGE, cmdline_args.internal_shard, CURRENT_STAGE, stage))
         CURRENT_STAGE = stage
     if barrier:
         assert mp_q
         mp_debug(cmdline_args, "Waiting for main process to release barrier for stage ", stage)
         barrier.wait()
         mp_debug(cmdline_args, "Barrier released for stage ", stage)
-        time.sleep(1)
 
 
 def flush_thread(f, qemu: boot_cheribsd.QemuCheriBSDInstance, should_exit_event: threading.Event):
@@ -130,7 +132,7 @@ def flush_thread(f, qemu: boot_cheribsd.QemuCheriBSDInstance, should_exit_event:
             timeout=qemu.flush_interval,
             log_patterns=False,
         )
-        if boot_cheribsd.PRETEND:
+        if get_global_config().pretend:
             time.sleep(1)
         elif i == 1:
             boot_cheribsd.failure("GOT KERNEL PANIC!", exit=False)
@@ -152,7 +154,7 @@ def run_remote_lit_tests(
     args: argparse.Namespace,
     tempdir: str,
     test_dirs: "list[str]",
-    test_env: "Optional[dict[str, str]]",
+    test_env: "Optional[dict[str, str]]" = None,
     mp_q: Optional[multiprocessing.Queue] = None,
     barrier: Optional[multiprocessing.Barrier] = None,
     llvm_lit_path: "Optional[str]" = None,
@@ -203,67 +205,41 @@ def run_remote_lit_tests_impl(
     qemu.EXIT_ON_KERNEL_PANIC = False  # since we run multiple threads we shouldn't use sys.exit()
     boot_cheribsd.info("PID of QEMU: ", qemu.pid)
 
-    if args.pretend and os.getenv("FAIL_TIMEOUT_BOOT") and args.internal_shard == 2:
+    if get_global_config().pretend and os.getenv("FAIL_TIMEOUT_BOOT") and args.internal_shard == 2:
         time.sleep(10)
     if mp_q:
         assert barrier is not None
+    assert CURRENT_STAGE == MultiprocessStages.BOOTING_CHERIBSD
     notify_main_process(args, MultiprocessStages.TESTING_SSH_CONNECTION, mp_q, barrier=barrier)
-    if args.pretend and os.getenv("FAIL_RAISE_EXCEPTION") and args.internal_shard == 1:
+    if get_global_config().pretend and os.getenv("FAIL_RAISE_EXCEPTION") and args.internal_shard == 1:
         raise RuntimeError("SOMETHING WENT WRONG!")
     qemu.checked_run("cat /root/.ssh/authorized_keys", timeout=20)
     port = args.ssh_port
-    user = "root"  # TODO: run these tests as non-root!
+
     test_build_dir = Path(args.build_dir)
-    # TODO: move this to boot_cheribsd.py
-    config_contents = """
-Host cheribsd-test-instance
-        User {user}
-        HostName localhost
-        Port {port}
-        IdentityFile {ssh_key}
-        # avoid errors due to changed host key:
-        UserKnownHostsFile /dev/null
-        StrictHostKeyChecking no
-        NoHostAuthenticationForLocalhost yes
-        # faster connection by reusing the existing one:
-        ControlPath {home}/.ssh/controlmasters/%r@%h:%p
-        # ConnectTimeout 20
-        # ConnectionAttempts 2
-        ControlMaster auto
-""".format(
-        user=user,
-        port=port,
+    config_contents = generate_ssh_config_file_for_qemu(
+        ssh_port=args.ssh_port,
         ssh_key=Path(args.ssh_key).with_suffix(""),
-        home=Path.home(),
+        config=get_global_config(),
     )
-    config_contents += "        ControlPersist {control_persist}\n"
-    # print("Writing ssh config: ", config_contents)
     with Path(tempdir, "config").open("w") as c:
-        # Keep socket open for 10 min (600) or indefinitely (yes)
-        c.write(config_contents.format(control_persist="yes"))
-    Path(Path.home(), ".ssh/controlmasters").mkdir(exist_ok=True)
+        c.write(config_contents)
     boot_cheribsd.run_host_command(["cat", str(Path(tempdir, "config"))])
 
     # Check that the config file works:
 
     def check_ssh_connection(prefix):
         connection_test_start = datetime.datetime.utcnow()
-        boot_cheribsd.run_host_command(
-            [
-                "ssh",
-                "-F",
-                str(Path(tempdir, "config")),
-                "cheribsd-test-instance",
-                "-p",
-                str(port),
-                "--",
-                "echo",
-                "connection successful",
-            ],
-            cwd=str(test_build_dir),
-        )
-        connection_time = (datetime.datetime.utcnow() - connection_test_start).total_seconds()
-        boot_cheribsd.success(prefix, " successful after ", connection_time, " seconds")
+        if ssh_host_accessible_uncached(
+            "cheribsd-test-instance",
+            ssh_args=("-F", str(Path(tempdir, "config"))),
+            config=get_global_config(),
+            run_in_pretend_mode=False,
+        ):
+            connection_time = (datetime.datetime.utcnow() - connection_test_start).total_seconds()
+            boot_cheribsd.success(prefix, " successful after ", connection_time, " seconds")
+        else:
+            boot_cheribsd.failure("Failed to connect via SSH", exit=True)
 
     check_ssh_connection("First SSH connection")
     controlmaster_running = False
@@ -285,7 +261,7 @@ Host cheribsd-test-instance
             c.write(config_contents.format(control_persist="no"))
         check_ssh_connection("Second SSH connection (without controlmaster)")
 
-    if args.pretend:
+    if get_global_config().pretend:
         time.sleep(2.5)
 
     extra_ssh_args = commandline_to_str(("-n", "-4", "-F", f"{tempdir}/config"))
@@ -310,20 +286,17 @@ Host cheribsd-test-instance
     executor = commandline_to_str(ssh_executor_args)
     # TODO: I was previously passing -t -t to ssh. Is this actually needed?
     boot_cheribsd.success("Running", testsuite, "tests with executor", executor)
-    notify_main_process(args, MultiprocessStages.RUNNING_TESTS, mp_q)
+    notify_main_process(args, MultiprocessStages.RUNNING_TESTS, mp_q, barrier=barrier)
     # have to use -j1 since otherwise CheriBSD might wedge
     if llvm_lit_path is None:
         llvm_lit_path = str(test_build_dir / "bin/llvm-lit")
     # Note: we require python 3 since otherwise it seems to deadlock in Jenkins
-    # TODO: the -D flags was for pre-LLVM 15, post LLVM-15 uses --param=
     lit_cmd = [
         sys.executable,
         llvm_lit_path,
         "-j1",
         "-vv",
         f"-Dexecutor={executor}",
-        "--param",
-        f"executor={executor}",
         *test_dirs,
     ]
     if lit_extra_args:

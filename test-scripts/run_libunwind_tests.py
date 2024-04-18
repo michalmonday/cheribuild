@@ -40,12 +40,10 @@ from run_tests_common import boot_cheribsd, run_tests_main
 def setup_libunwind_env(qemu: boot_cheribsd.CheriBSDInstance, _: argparse.Namespace):
     # Ensure that the local libunwind.so is used instead of the system one
     qemu.checked_run("echo ln -sfv /build/lib/libunwind.so.1 /build/lib/libgcc_s.so.1")
-    boot_cheribsd.prepend_ld_library_path(qemu, "/build/lib")
 
 
 def run_libunwind_tests(qemu: boot_cheribsd.CheriBSDInstance, args: argparse.Namespace):
     common_args = dict(
-        test_env=dict(LD_LIBRARY_PATH="/build/lib", LD64_LIBRARY_PATH="/build/lib", LD64C_LIBRARY_PATH="/build/lib"),
         test_dirs=["libunwind/test"],
         llvm_lit_path=args.llvm_lit_path,
     )

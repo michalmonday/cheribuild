@@ -44,15 +44,41 @@ from typing import Callable, Optional, Union
 
 from .colour import AnsiColour, coloured
 
-# reduce the number of import statements per project  # no-combine
-__all__ = ["typing", "include_local_file", "Type_T", "init_global_config",  # no-combine
-           "status_update", "fatal_error", "coloured", "AnsiColour", "query_yes_no",  # no-combine
-           "warning_message", "DoNotUseInIfStmt", "ThreadJoiner", "InstallInstructions",  # no-combine
-           "SafeDict", "error_message", "ConfigBase", "final", "add_error_context",  # no-combine
-           "default_make_jobs_count", "OSInfo", "is_jenkins_build", "get_global_config",  # no-combine
-           "classproperty", "find_free_port", "have_working_internet_connection", "SocketAndPort",  # no-combine
-           "is_case_sensitive_dir", "replace_one", "cached_property", "remove_prefix",  # no-combine
-           "remove_duplicates", "remove_tuple_duplicates"]  # no-combine
+# reduce the number of import statements per project
+__all__ = [
+    "AnsiColour",
+    "ConfigBase",
+    "DoNotUseInIfStmt",
+    "InstallInstructions",
+    "OSInfo",
+    "SafeDict",
+    "SocketAndPort",
+    "ThreadJoiner",
+    "Type_T",
+    "add_error_context",
+    "cached_property",
+    "classproperty",
+    "coloured",
+    "default_make_jobs_count",
+    "error_message",
+    "fatal_error",
+    "final",
+    "find_free_port",
+    "get_global_config",
+    "have_working_internet_connection",
+    "include_local_file",
+    "init_global_config",
+    "is_case_sensitive_dir",
+    "is_jenkins_build",
+    "query_yes_no",
+    "remove_duplicates",
+    "remove_prefix",
+    "remove_tuple_duplicates",
+    "replace_one",
+    "status_update",
+    "typing",
+    "warning_message",
+]
 
 if sys.version_info < (3, 6, 0):
     sys.exit("This script requires at least Python 3.6.0")
@@ -62,6 +88,7 @@ Type_T = typing.TypeVar("Type_T")
 try:
     from typing import final
 except ImportError:
+
     def final(f: Type_T) -> Type_T:
         return f
 
@@ -79,6 +106,7 @@ class classproperty(typing.Generic[Type_T]):  # noqa: N801
 if typing.TYPE_CHECKING:
     DoNotUseInIfStmt = bool
 else:
+
     class DoNotUseInIfStmt:
         def __bool__(self) -> "typing.NoReturn":
             raise ValueError("Should not be used")
@@ -100,8 +128,9 @@ class ConfigBase:
         self.internet_connection_last_check_result = False
 
 
-GlobalConfig: ConfigBase = ConfigBase(pretend=DoNotUseInIfStmt(), verbose=DoNotUseInIfStmt(), quiet=DoNotUseInIfStmt(),
-                                      force=DoNotUseInIfStmt())
+GlobalConfig: ConfigBase = ConfigBase(
+    pretend=DoNotUseInIfStmt(), verbose=DoNotUseInIfStmt(), quiet=DoNotUseInIfStmt(), force=DoNotUseInIfStmt()
+)
 
 
 def init_global_config(config: ConfigBase, *, test_mode: bool = False) -> None:
@@ -135,8 +164,9 @@ else:
             if self.attrname is None:
                 self.attrname = name
             elif name != self.attrname:
-                raise TypeError("Cannot assign the same cached_property to two different names "
-                                f"({self.attrname} and {name}).")
+                raise TypeError(
+                    f"Cannot assign the same cached_property to two different names ({self.attrname} and {name})."
+                )
 
         def __get__(self, instance, owner=None) -> Type_T:
             if instance is None:
@@ -146,8 +176,9 @@ else:
             try:
                 cache = instance.__dict__
             except AttributeError:  # not all objects have __dict__ (e.g. class defines slots)
-                msg = ("No '__dict__' attribute on {} instance to cache {} property.".format(type(instance).__name__,
-                                                                                             self.attrname))
+                msg = (
+                    f"No '__dict__' attribute on {type(instance).__name__} instance to cache {self.attrname} property."
+                )
                 raise TypeError(msg) from None
             val = cache.get(self.attrname, _NOT_FOUND)
             if val is _NOT_FOUND:
@@ -159,8 +190,10 @@ else:
                         try:
                             cache[self.attrname] = val
                         except TypeError:
-                            msg = ("The '__dict__' attribute on {} instance does not support item assignment for"
-                                   " caching {} property.".format(type(instance).__name__, self.attrname))
+                            msg = (
+                                f"The '__dict__' attribute on {type(instance).__name__} instance does not support "
+                                f"item assignment for caching {self.attrname} property."
+                            )
                             raise TypeError(msg) from None
             return val
 
@@ -183,10 +216,11 @@ def find_free_port(preferred_port: "Optional[int]" = None) -> SocketAndPort:
             return SocketAndPort(s, s.getsockname()[1])
         except OSError as e:
             import errno
+
             if e.errno != errno.EADDRINUSE:
                 warning_message("Got unexpected error when checking whether port", preferred_port, "is free:", e)
             status_update("Port", preferred_port, "is not available, falling back to using a random port")
-    s.bind(('localhost', 0))
+    s.bind(("localhost", 0))
     return SocketAndPort(s, s.getsockname()[1])
 
 
@@ -200,9 +234,9 @@ def default_make_jobs_count() -> Optional[int]:
 
 
 def maybe_add_space(msg: str, sep: str) -> "tuple[str, ...]":
-    if sep == "":
+    if not sep:
         return msg, " "
-    return (msg, )
+    return (msg,)
 
 
 def status_update(*args, sep=" ", **kwargs) -> None:
@@ -210,8 +244,11 @@ def status_update(*args, sep=" ", **kwargs) -> None:
 
 
 def fixit_message(*args, sep=" ") -> None:
-    print(coloured(AnsiColour.blue, maybe_add_space("Possible solution:", sep) + args, sep=sep), file=sys.stderr,
-          flush=True)
+    print(
+        coloured(AnsiColour.blue, maybe_add_space("Possible solution:", sep) + args, sep=sep),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def warning_message(*args, sep=" ", fixit_hint=None) -> None:
@@ -240,8 +277,11 @@ def add_error_context(context: str):
 def _add_error_context(prefix, args, sep) -> "str":
     if _ERROR_CONTEXT:
         # _ERROR_CONTEXT might contain escape sequences so we have to reset to red afterwards
-        return coloured(AnsiColour.red, maybe_add_space(prefix + " " + _ERROR_CONTEXT[-1] +
-                                                        AnsiColour.red.escape_sequence() + ":", sep) + args, sep=sep)
+        return coloured(
+            AnsiColour.red,
+            maybe_add_space(prefix + " " + _ERROR_CONTEXT[-1] + AnsiColour.red.escape_sequence() + ":", sep) + args,
+            sep=sep,
+        )
     return coloured(AnsiColour.red, maybe_add_space(prefix + ":", sep) + args, sep=sep)
 
 
@@ -268,8 +308,14 @@ def fatal_error(*args, sep=" ", fixit_hint=None, fatal_when_pretending=False, ex
         sys.exit(exit_code)
 
 
-def query_yes_no(config: ConfigBase, message: str = "", *, default_result=False, force_result=True,
-                 yes_no_str: "Optional[str]" = None) -> bool:
+def query_yes_no(
+    config: ConfigBase,
+    message: str = "",
+    *,
+    default_result=False,
+    force_result=True,
+    yes_no_str: "Optional[str]" = None,
+) -> bool:
     if yes_no_str is None:
         yes_no_str = " [Y]/n " if default_result else " y/[N] "
     if config.pretend:
@@ -353,8 +399,12 @@ def is_case_sensitive_dir(d: Path) -> bool:
 
 
 class InstallInstructions:
-    def __init__(self, message: "Union[str, Callable[[], str]]",
-                 cheribuild_target: "Optional[str]" = None, alternative: "Optional[str]" = None):
+    def __init__(
+        self,
+        message: "Union[str, Callable[[], str]]",
+        cheribuild_target: "Optional[str]" = None,
+        alternative: "Optional[str]" = None,
+    ):
         self._message = message
         self.cheribuild_target = cheribuild_target
         self.alternative = alternative
@@ -418,7 +468,7 @@ class OSInfo:
             d = {}
             for line in f:
                 line = line.strip()
-                if line == '' or line[0] == '#':
+                if not line or line[0] == "#":
                     continue
                 k, v = line.split("=", maxsplit=1)
                 # .strip('"') will remove if there or else do nothing
@@ -441,8 +491,19 @@ class OSInfo:
         return "<system package manager>"
 
     @classmethod
-    def install_instructions(cls, name, is_lib, default=None, homebrew=None, apt=None, zypper=None, freebsd=None,
-                             cheribuild_target=None, alternative=None, compat_abi=False) -> InstallInstructions:
+    def install_instructions(
+        cls,
+        name,
+        is_lib,
+        default=None,
+        homebrew=None,
+        apt=None,
+        zypper=None,
+        freebsd=None,
+        cheribuild_target=None,
+        alternative=None,
+        compat_abi=False,
+    ) -> InstallInstructions:
         guessed_package = False
         if cls.IS_MAC and homebrew:
             install_name = homebrew
@@ -468,8 +529,8 @@ class OSInfo:
                             if msg_start:
                                 hint = hint[msg_start:]
                             return hint
-                        return "Could not find package for program " + name + ". " \
-                               "Maybe `zypper in " + name + "` will work."
+                        return f"Could not find package for program {name}. Maybe `zypper in {name}` will work."
+
                     return InstallInstructions(command_not_found, cheribuild_target, alternative)
                 guessed_package = True
                 install_name = "lib" + name + "-devel" if is_lib else name
@@ -482,12 +543,16 @@ class OSInfo:
 
         if guessed_package:
             # not sure if the package name is correct:
-            return InstallInstructions(f"Possibly running `{cls.package_manager(compat_abi)} install {install_name}"
-                                       f"` fixes this. Note: package name may not be correct.", cheribuild_target,
-                                       alternative)
+            return InstallInstructions(
+                f"Possibly running `{cls.package_manager(compat_abi)} install {install_name}"
+                "` fixes this. Note: package name may not be correct.",
+                cheribuild_target,
+                alternative,
+            )
         else:
-            return InstallInstructions(f"Run `{cls.package_manager(compat_abi)} install " + install_name + "`",
-                                       cheribuild_target, alternative)
+            return InstallInstructions(
+                f"Run `{cls.package_manager(compat_abi)} install " + install_name + "`", cheribuild_target, alternative
+            )
 
     @classmethod
     def uses_apt(cls) -> bool:
@@ -536,7 +601,7 @@ def remove_prefix(s: str, prefix: str, prefix_required=False) -> str:
         if prefix_required:
             raise ValueError(s + " does not start with " + prefix)
         return s
-    return s[len(prefix):]
+    return s[len(prefix) :]
 
 
 # A dictionary for string formatting (format_map) that preserves values not

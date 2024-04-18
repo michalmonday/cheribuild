@@ -51,16 +51,21 @@ from ..utils import replace_one
 # pulled in the fixes.
 class BuildLibuv(CrossCompileCMakeProject):
     target = "libuv"
-    repository = GitRepository("https://github.com/libuv/libuv.git",
-                               temporary_url_override="https://github.com/arichardson/libuv.git",
-                               url_override_reason="https://github.com/libuv/libuv/pull/3756")
+    repository = GitRepository(
+        "https://github.com/libuv/libuv.git",
+        temporary_url_override="https://github.com/arichardson/libuv.git",
+        url_override_reason="https://github.com/libuv/libuv/pull/3756",
+    )
 
 
 # Not really autotools but same sequence of commands (other than the script being call bootstrap instead of configure)
 class BuildCMake(AutotoolsProject):
-    repository = GitRepository("https://github.com/Kitware/CMake",  # a lot faster than "https://cmake.org/cmake.git"
-                               # track the stable release branch
-                               default_branch="release")
+    repository = GitRepository(
+        "https://github.com/Kitware/CMake",  # a lot faster than "https://cmake.org/cmake.git"
+        # track the stable release branch
+        default_branch="release",
+    )
+    default_architecture = CompilationTargets.NATIVE
     native_install_dir = DefaultInstallDir.BOOTSTRAP_TOOLS
     make_kind = MakeCommandKind.Ninja
     add_host_target_build_config_options = False
@@ -80,7 +85,12 @@ class BuildCMake(AutotoolsProject):
             # CTest is broken on purecap Morello with the bundled libuv (passes pointers via a pipe)
             # NB: --bootstrap-system-libuv is not needed since the usage outside CTest is fine.
             self.configure_args.append("--system-libuv")
-            self.configure_environment["CMAKE_PREFIX_PATH"] = BuildLibuv.get_install_dir(self)
+            self.configure_args.append("--bootstrap-system-libuv")
+            self.configure_environment["CMAKE_PREFIX_PATH"] = str(BuildLibuv.get_install_dir(self))
+            self.configure_environment["LDFLAGS"] = (
+                f"-L{BuildLibuv.get_install_dir(self) / 'lib'} "
+                f"-Wl,-rpath,{BuildLibuv.get_install_dir(self) / 'lib'}"
+            )
 
     def run_tests(self) -> None:
         self.run_make("test", logfile_name="test")
@@ -124,15 +134,23 @@ class BuildCrossCompiledCMake(CMakeProject):
         self.add_cmake_options(CMAKE_USE_SYSTEM_LIBRARY_LIBUV=True)
         # CMake can't find the static libuv due to a different libname
         self.add_cmake_options(
-            LibUV_LIBRARY=BuildLibuv.get_install_dir(self) / self.target_info.default_libdir / "libuv_a.a")
+            LibUV_LIBRARY=BuildLibuv.get_install_dir(self) / self.target_info.default_libdir / "libuv_a.a"
+        )
 
     def run_tests(self):
         # TODO: generate JUnit output once https://gitlab.kitware.com/cmake/cmake/-/merge_requests/6020 is merged
         # Can't run the testsuite since many tests depend on having a C compiler installed.
         test_command = "cd /build && ./bin/ctest -N"
-        self.target_info.run_cheribsd_test_script("run_simple_tests.py", "--test-command", test_command,
-                                                  "--test-timeout", str(120 * 60),
-                                                  mount_builddir=True, mount_sourcedir=True, mount_sysroot=True)
+        self.target_info.run_cheribsd_test_script(
+            "run_simple_tests.py",
+            "--test-command",
+            test_command,
+            "--test-timeout",
+            str(120 * 60),
+            mount_builddir=True,
+            mount_sourcedir=True,
+            mount_sysroot=True,
+        )
 
 
 # Add a cmake-native target for consistency.

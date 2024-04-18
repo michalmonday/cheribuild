@@ -53,11 +53,25 @@ from ..simple_project import SimpleProject
 from ...config.compilation_targets import CompilationTargets
 from ...utils import AnsiColour, coloured
 
-__all__ = ["CheriConfig", "CrossCompileCMakeProject", "CrossCompileAutotoolsProject",  # no-combine
-           "CrossCompileTarget", "CrossCompileSimpleProject", "CrossCompileProject",  # no-combine
-           "MakeCommandKind", "Linkage", "DefaultInstallDir", "BuildType", "CompilationTargets",  # no-combine
-           "GitRepository", "CrossCompileMixin", "CrossCompileMakefileProject",  # no-combine
-           "CrossCompileMesonProject", "commandline_to_str", "SubversionRepository"]  # no-combine
+__all__ = [
+    "BuildType",
+    "CheriConfig",
+    "CompilationTargets",
+    "CrossCompileAutotoolsProject",
+    "CrossCompileCMakeProject",
+    "CrossCompileMakefileProject",
+    "CrossCompileMesonProject",
+    "CrossCompileMixin",
+    "CrossCompileProject",
+    "CrossCompileSimpleProject",
+    "CrossCompileTarget",
+    "DefaultInstallDir",
+    "GitRepository",
+    "Linkage",
+    "MakeCommandKind",
+    "SubversionRepository",
+    "commandline_to_str",
+]
 
 
 if typing.TYPE_CHECKING:
@@ -123,7 +137,7 @@ class CrossCompileAutotoolsProject(CrossCompileMixin, AutotoolsProject):
         for k, v in kwargs.items():
             self.add_configure_env_arg(k, v)
 
-    def set_configure_prog_with_args(self, prog: str, path: Path, args: list):
+    def set_configure_prog_with_args(self, prog: str, path: Path, args: "list[Union[str, Path]]"):
         super().set_configure_prog_with_args(prog, path, args)
         if self._configure_supports_variables_on_cmdline:
             self.configure_args.append(prog + "=" + self.configure_environment[prog])
@@ -167,8 +181,13 @@ class CrossCompileAutotoolsProject(CrossCompileMixin, AutotoolsProject):
         env = {k: v for k, v in self.configure_environment.items() if v}
         self.configure_environment.clear()
         self.configure_environment.update(env)
-        self.print(coloured(AnsiColour.yellow, "Cross configure environment:\n\t",
-                            "\n\t".join(k + "=" + str(v) for k, v in self.configure_environment.items())))
+        self.print(
+            coloured(
+                AnsiColour.yellow,
+                "Cross configure environment:\n\t",
+                "\n\t".join(k + "=" + str(v) for k, v in self.configure_environment.items()),
+            )
+        )
         super().configure(**kwargs)
 
     def process(self):

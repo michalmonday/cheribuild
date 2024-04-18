@@ -44,6 +44,8 @@ from pathlib import Path
 from kyua_db_to_junit_xml import convert_kyua_db_to_junit_xml, fixup_kyua_generated_junit_xml
 from run_tests_common import CrossCompileTarget, boot_cheribsd, pexpect, run_tests_main
 
+from pycheribuild.utils import get_global_config
+
 
 def run_cheribsdtest(
     qemu: boot_cheribsd.QemuCheriBSDInstance,
@@ -72,7 +74,7 @@ def run_cheribsdtest(
         qemu.run(test_command, ignore_cheri_trap=True, cheri_trap_fatal=False, timeout=5 * 60)
         qemu.sendline("echo EXITCODE=$?")
         qemu.expect(["EXITCODE=(\\d+)\r"], timeout=5, pretend_result=0)
-        if boot_cheribsd.PRETEND:
+        if get_global_config().pretend:
             exit_code = 0
         else:
             print(qemu.match.groups())
@@ -145,6 +147,7 @@ def run_cheribsd_test(qemu: boot_cheribsd.QemuCheriBSDInstance, args: argparse.N
             (b[0] + "".join(f), b[1]) for f in cheribsdtest_features_powerset for b in cheribsdtest_bases
         ]
         cheribsdtest_tests.append(("cheribsdtest-mt-c18n", True))
+        cheribsdtest_tests.append(("cheribsdtest-benchmark-mt-c18n", True))
         for test in cheribsdtest_tests:
             if not run_cheribsdtest(qemu, test[0], [], test[1], args):
                 tests_successful = False
@@ -232,7 +235,7 @@ def run_cheribsd_test(qemu: boot_cheribsd.QemuCheriBSDInstance, args: argparse.N
 
     # Update the JUnit stats in the XML files (both kyua and cheribsdtest):
     if args.kyua_tests_files or args.run_cheribsdtest:
-        if not boot_cheribsd.PRETEND:
+        if not get_global_config().pretend:
             time.sleep(2)  # sleep two seconds to ensure the files exist
         junit_dir = Path(args.test_output_dir)
         if host_has_kyua:
@@ -303,7 +306,7 @@ def cheribsd_setup_args(args: argparse.Namespace):
             real_output_dir = (test_output_dir / args.timestamp).absolute()
         args.test_output_dir = str(real_output_dir)
         boot_cheribsd.run_host_command(["mkdir", "-p", str(real_output_dir)])
-        if not boot_cheribsd.PRETEND:
+        if not get_global_config().pretend:
             (real_output_dir / "cmdline").write_text(str(sys.argv))
         args.smb_mount_directories.append(
             boot_cheribsd.SmbMount(real_output_dir, readonly=False, in_target="/test-results"),
