@@ -303,6 +303,8 @@ class _ClangBasedTargetInfo(TargetInfo, metaclass=ABCMeta):
             pass  # No additional flags needed for x86_64.
         else:
             project.warning("Compiler flags might be wong, only native + MIPS checked so far")
+
+        result.append('-g')
         return result
 
     @classmethod
