@@ -1,0 +1,1 @@
+~/cheribuild/cheribuild.py cheribsd-mfs-root-kernel-riscv64-purecap --cheribsd-mfs-root-kernel-riscv64-purecap/build-fpga-kernels -d && ~/cheri/output/sdk/bin/llvm-objdump -sSD ~/cheri/output/kernel-riscv64-purecap.CHERI-PURECAP-GFE.full > ~/cheri/purecap_gfe_full.objdump
